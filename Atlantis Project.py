@@ -1,11 +1,14 @@
 import streamlit as st
 import time
 import os
+import numpy as np
 from twelvelabs import TwelveLabs
 from dotenv import load_dotenv
 import base64
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 from twelvelabs import APIStatusError, AuthenticationError
+from twelvelabs.models.embed import EmbeddingsTask
+from openai import OpenAI
 
 # Load environment variables
 load_dotenv("Atlantis.env")
@@ -15,6 +18,8 @@ TWELVE_LABS_API_KEY = os.getenv('TWELVE_LABS_API_KEY')
 
 # Initialize Twelve Labs client
 client = TwelveLabs(api_key=TWELVE_LABS_API_KEY)
+
+openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 # Streamlit session state initialization
 if 'video_index_id' not in st.session_state:
@@ -70,6 +75,7 @@ def upload_video(index_id, video_bytes):
 
         if task.status == 'ready':
             st.success(f"Uploaded video. The unique identifier of your video is {task.video_id}")
+            st.session_state['video_id'] = task.video_id  # Set the video_id in session state
             return task.video_id
         else:
             st.error(f"Indexing failed with status {task.status}")
@@ -95,7 +101,16 @@ def chat_with_bot(user_input):
         messages.append({"role": "user", "content": user_input})
 
         # Search for relevant content in the video
-        search_results = search_video(st.session_state['video_index_id'], user_input)
+        if 'video_embeddings' in st.session_state:
+            search_results = search_video(
+                client,
+                st.session_state['video_index_id'],
+                user_input,
+                st.session_state['video_embeddings']
+            )
+        else:
+            st.error("Video embeddings not found. Please ensure the video is properly processed.")
+            return "I'm sorry, but I couldn't find the video embeddings. Please make sure the video has been properly processed."
 
         # Generate a summary based on the search results
         if search_results:
@@ -104,41 +119,109 @@ def chat_with_bot(user_input):
                 prompt=f"Based on the video content, respond to this user message: {user_input}"
             )
         else:
-            response_text = "No relevant content found."
+            response_text = "No relevant content found in the video for your question."
 
         messages.append({"role": "assistant", "content": response_text})
         st.session_state['chat_history'] = messages
         return response_text
     except Exception as e:
         st.error(f"Error during chatbot conversation: {str(e)}")
-        return ""
+        return "I'm sorry, but an error occurred while processing your request."
 
-def search_video(index_id, prompt):
+def create_video_embeddings(video_file_path, relevant_clips):
     try:
-        search_results = client.search.query(
-            index_id,
-            ["visual", "conversation", "text_in_video", "logo"],  # Options as a positional argument
-            query_text=prompt,
-            threshold="low",
-            page_limit=10
+        task = client.embed.task.create(
+            engine_name="Marengo-retrieval-2.6",
+            video_file=video_file_path,
+            video_embedding_scopes=["clip", "video"]  # Create embeddings for clips and the entire video
         )
-        return search_results.data
+        st.success(f"Created embedding task: id={task.id}")
+
+        def on_task_update(task):
+            st.text(f"Embedding Status: {task.status}")
+
+        task.wait_for_done(sleep_interval=2, callback=on_task_update)
+
+        if task.status == 'ready':
+            st.success("Video embedding task completed successfully")
+            return task.id
+        else:
+            st.error(f"Embedding task failed with status {task.status}")
+            return None
+    except Exception as e:
+        st.error(f"An error occurred while creating video embeddings: {str(e)}")
+        return None
+
+def retrieve_embeddings(task_id):
+    try:
+        task = client.embed.task.retrieve(task_id)
+        if task.video_embeddings is not None:
+            st.success("Retrieved video embeddings successfully")
+            return task.video_embeddings
+        else:
+            st.warning("No embeddings found for the task")
+            return None
+    except Exception as e:
+        st.error(f"Failed to retrieve embeddings: {str(e)}")
+        return None
+
+def retrieve_embeddings(task_id):
+    try:
+        task = client.embed.task.retrieve(task_id)
+        if task.video_embeddings is not None:
+            st.success("Retrieved video embeddings successfully")
+            return task.video_embeddings
+        else:
+            st.warning("No embeddings found for the task")
+            return None
+    except Exception as e:
+        st.error(f"Failed to retrieve embeddings: {str(e)}")
+        return None
+
+
+
+def search_video(client, index_id, prompt, video_embeddings):
+    try:
+        # Generate embedding for the query
+        query_embedding = client.embed.create(
+            engine_name="Marengo-retrieval-2.6",
+            text=prompt,
+            text_truncate="end"  # Add this line to specify truncation behavior
+        )
+
+        if query_embedding.text_embedding is None:
+            st.error("Failed to generate query embedding")
+            return []
+
+        # Use the text embedding
+        query_vector = np.array(query_embedding.text_embedding.float)
+
+        # Perform semantic search
+        results = []
+        for video_embedding in video_embeddings:
+            clip_vector = np.array(video_embedding.embedding.float)
+            # Calculate cosine similarity
+            similarity = np.dot(query_vector, clip_vector) / (np.linalg.norm(query_vector) * np.linalg.norm(clip_vector))
+            results.append({
+                'start': video_embedding.start_offset_sec,
+                'end': video_embedding.end_offset_sec,
+                'score': float(similarity),
+                'embedding_scope': video_embedding.embedding_scope
+            })
+
+        # Sort results by similarity score
+        results.sort(key=lambda x: x['score'], reverse=True)
+
+        # Return top 10 results
+        return results[:10]
     except Exception as e:
         st.error(f"Failed to search video: {str(e)}")
+        st.error(f"Error details: {type(e).__name__}, {str(e)}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
         return []
 
 
-def generate_summary(video_id, summary_type="summary", prompt=""):
-    try:
-        res = client.generate.summarize(
-            video_id=video_id, 
-            type=summary_type, 
-            prompt=prompt
-        )
-        return res.summary
-    except Exception as e:
-        st.error(f"Error generating summary: {str(e)}")
-        return ""
 
 def generate_open_ended_text(video_id, prompt):
     try:
@@ -153,13 +236,44 @@ def generate_open_ended_text(video_id, prompt):
         st.error(f"Error generating open-ended text: {str(e)}")
         return ""
 
+def summarize_chat_history(chat_history):
+    prompt = """
+    Summarize the following chat history into a concise search prompt for a video game scenario page. 
+    The summary should:
+    - Capture key steps and important elements mentioned in the conversation
+    - Be relevant to the video content and user's intentions
+    - Be structured for effective video clip search
+    - Not exceed 76 tokens
+    - Frame the content for a wiki-style or scenario-based gaming page
+    - Highlight crucial user inputs for accurate video clip retrieval
+
+    Chat History:
+    """
+    
+    for message in chat_history:
+        prompt += f"\n{message['role'].capitalize()}: {message['content']}"
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that summarizes chat histories into search prompts for video game scenario pages."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=76
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        st.error(f"Error summarizing chat history: {str(e)}")
+        return ""
+
 def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
     try:
         ffmpeg_extract_subclip(video_file_path, start_time, end_time, targetname=output_file_path)
     except Exception as e:
         st.error(f"Error extracting video clip: {str(e)}")
 
-def generate_scenario_page(prompt, search_results, summaries):
+def generate_scenario_page(prompt, search_results, descriptions):
     html_content = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -194,9 +308,9 @@ def generate_scenario_page(prompt, search_results, summaries):
         <h2>{prompt}</h2>
     """
 
-    for i, (clip, summary) in enumerate(zip(search_results, summaries), 1):
-        start_time = int(clip.start) if hasattr(clip, 'start') else 0
-        end_time = int(clip.end) if hasattr(clip, 'end') else 0
+    for i, (clip, description) in enumerate(zip(search_results, descriptions), 1):
+        start_time = clip['start']
+        end_time = clip['end']
 
         html_content += f"""
         <div class="clip" id="clip-{i}">
@@ -222,8 +336,8 @@ def generate_scenario_page(prompt, search_results, summaries):
                     }});
                 }})();
             </script>
-            <p><strong>Relevance Score:</strong> {getattr(clip, 'score', 'N/A')}</p>
-            <p><strong>AI Summary:</strong> {summary}</p>
+            <p><strong>Relevance Score:</strong> {clip['score']:.2f}</p>
+            <p><strong>AI Description:</strong> {description}</p>
             <div class="comments">
                 <h4>Comments</h4>
                 <!-- Comments would be dynamically added here -->
@@ -260,6 +374,15 @@ def main():
             st.session_state['video_id'] = upload_video(st.session_state['video_index_id'], video_bytes)
             st.session_state['video_file_path'] = "uploaded_video.mp4"
 
+    # Create embeddings after video upload
+    if st.session_state['video_id'] is not None and 'video_embeddings' not in st.session_state:
+        with st.spinner("Creating video embeddings..."):
+            embedding_task_id = create_video_embeddings(st.session_state['video_file_path'], None)
+            if embedding_task_id:
+                video_embeddings = retrieve_embeddings(embedding_task_id)
+                if video_embeddings:
+                    st.session_state['video_embeddings'] = video_embeddings
+
     # Step 2: Generate Gist
     if st.session_state['video_id'] is not None:
         st.header("Video Gist")
@@ -289,29 +412,37 @@ def main():
     # Step 4: Generate Scenario Page
     if st.button("Generate Scenario") and len(st.session_state['chat_history']) > 0:
         with st.spinner("Processing..."):
-            # Combine the conversation history into a single prompt
-            conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state['chat_history']])
+            # Summarize the chat history for search
+            search_prompt = summarize_chat_history(st.session_state['chat_history'])
+            st.write("Search Prompt:", search_prompt)  # Display the search prompt (you can remove this line later)
 
-            # Search for relevant clips using the conversation text
-            search_results = search_video(st.session_state['video_index_id'], conversation_text)
+            # Search for relevant clips using the summarized search prompt and embeddings
+            if 'video_embeddings' in st.session_state:
+                search_results = search_video(
+                    client,
+                    st.session_state['video_index_id'], 
+                    search_prompt, 
+                    st.session_state['video_embeddings']
+                )
+            else:
+                st.error("Video embeddings not found. Please ensure the video is properly processed.")
+                return
+
             if not search_results:
                 st.warning("No relevant clips found.")
                 return
 
-            # Generate summaries for each clip
-            summaries = []
+            # Generate detailed descriptions for each clip
+            descriptions = []
             for clip in search_results:
-                start_time = int(clip.start) if hasattr(clip, 'start') else 0
-                end_time = int(clip.end) if hasattr(clip, 'end') else 0
-                summary = generate_summary(
+                description = generate_open_ended_text(
                     st.session_state['video_id'],
-                    summary_type="highlight",
-                    prompt=f"Generate a highlight for this clip in the context of: {conversation_text}"
+                    prompt=f"Provide a detailed description of this clip from {clip['start']} to {clip['end']} seconds in the context of: {search_prompt}. Include relevant gameplay elements, strategies, or key events."
                 )
-                summaries.append(summary)
+                descriptions.append(description)
 
             # Generate HTML content for the scenario page
-            html_content = generate_scenario_page(conversation_text, search_results, summaries)
+            html_content = generate_scenario_page(search_prompt, search_results, descriptions)
 
             # Display the scenario page
             st.subheader("Generated Scenario Page")
