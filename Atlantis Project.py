@@ -114,19 +114,39 @@ def chat_with_bot(user_input):
 
         # Generate a summary based on the search results
         if search_results:
+            # Create a context from the top 5 search results, but limit the length
+            context = ""
+            for result in search_results[:5]:
+                summary = generate_open_ended_text(
+                    st.session_state['video_id'],
+                    f'Summarize the key points from {result["start"]} to {result["end"]} seconds in about 75 words.'
+                )
+                context += f"From {result['start']} to {result['end']} seconds: {summary}\n\n"
+                if len(context) > 900:  # Increased context length
+                    break
+            
+            prompt = f"""Based on the following video content:
+
+{context}
+
+Respond to this user message in detail (about 200-250 words):
+{user_input}
+
+Include specific references to the video content where relevant, and provide a comprehensive answer that covers the main points while still being concise."""
+            
             response_text = generate_open_ended_text(
                 video_id=st.session_state['video_id'],
-                prompt=f"Based on the video content, respond to this user message: {user_input}"
+                prompt=prompt
             )
         else:
-            response_text = "No relevant content found in the video for your question."
+            response_text = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
 
         messages.append({"role": "assistant", "content": response_text})
         st.session_state['chat_history'] = messages
         return response_text
     except Exception as e:
         st.error(f"Error during chatbot conversation: {str(e)}")
-        return "I'm sorry, but an error occurred while processing your request."
+        return "I'm sorry, but an error occurred while processing your request. Please try again or rephrase your question."
 
 def create_video_embeddings(video_file_path, relevant_clips):
     try:
@@ -186,7 +206,7 @@ def search_video(client, index_id, prompt, video_embeddings):
         query_embedding = client.embed.create(
             engine_name="Marengo-retrieval-2.6",
             text=prompt,
-            text_truncate="end"  # Add this line to specify truncation behavior
+            text_truncate="end"  # Specify truncation behavior
         )
 
         if query_embedding.text_embedding is None:
@@ -209,8 +229,10 @@ def search_video(client, index_id, prompt, video_embeddings):
                 'embedding_scope': video_embedding.embedding_scope
             })
 
-        # Sort results by similarity score
-        results.sort(key=lambda x: x['score'], reverse=True)
+        # Sort results by a combination of similarity score and chronological order
+        # This creates a tuple (score, -start) for each result
+        # Sorting by this tuple prioritizes higher scores and earlier start times
+        results.sort(key=lambda x: (x['score'], -x['start']), reverse=True)
 
         # Return top 10 results
         return results[:10]
@@ -249,7 +271,7 @@ def summarize_chat_history(chat_history):
     - Emphasize the importance of maintaining chronological order in the video clips
     - Include language that encourages sequential progression through the game or scenario
 
-    Ensure the summary search prompt promotes a chronological flow of events based on the chat history info, using phrases like:
+    Ensure the summary search prompt promotes a chronological flow of events based on the chat history info and the video content, using phrases like:
     - "From the beginning of the game..."
     - "As the gameplay progresses..."
     - "Moving on to the next stage..."
