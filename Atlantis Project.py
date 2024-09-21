@@ -274,6 +274,9 @@ def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
         st.error(f"Error extracting video clip: {str(e)}")
 
 def generate_scenario_page(prompt, search_results, descriptions):
+    st.subheader("Generated Scenario Page")
+    st.write(f"**Scenario: {prompt}**")
+
     html_content = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -281,26 +284,13 @@ def generate_scenario_page(prompt, search_results, descriptions):
         <meta charset="UTF-8">
         <title>Scenario Page: {prompt}</title>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 0 auto;
-                padding: 20px;
-                max-width: 800px;
-            }}
-            .clip {{
-                margin-bottom: 30px;
-            }}
-            .clip video {{
-                width: 100%;
-                height: auto;
-            }}
-            .comments {{
-                margin-top: 20px;
-            }}
-            .comment {{
-                border-top: 1px solid #ccc;
-                padding-top: 10px;
-            }}
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }}
+            .clip {{ margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }}
+            .clip h3 {{ color: #333; }}
+            .relevance-score {{ font-style: italic; color: #666; }}
+            .description {{ margin-top: 10px; }}
+            .comments {{ margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }}
+            video {{ width: 100%; max-width: 600px; }}
         </style>
     </head>
     <body>
@@ -310,40 +300,42 @@ def generate_scenario_page(prompt, search_results, descriptions):
 
     for i, (clip, description) in enumerate(zip(search_results, descriptions), 1):
         start_time = clip['start']
-        end_time = clip['end']
+        
+        st.write(f"### Clip {i}")
+        
+        # Use Streamlit's video component for display in the app
+        st.video(st.session_state['video_file_path'], start_time=int(start_time))
+        
+        st.write(f"**Relevance Score:** {clip['score']:.2f}")
+        st.write("**AI Description:**")
+        st.markdown(description)
+        
+        st.write("**Comments**")
+        st.write("User1: This part was really challenging!")
+        
+        st.write("---")
 
+        # Add content to the HTML for download
         html_content += f"""
-        <div class="clip" id="clip-{i}">
+        <div class="clip">
             <h3>Clip {i}</h3>
-            <video controls id="clip-{i}-video" data-start-time="{start_time}" data-end-time="{end_time}">
-                <source src="{st.session_state['video_file_path']}" type="video/mp4">
+            <video controls id="video-{i}">
+                <source src="uploaded_video.mp4" type="video/mp4">
                 Your browser does not support the video tag.
             </video>
             <script>
-                (function() {{
-                    var video = document.getElementById('clip-{i}-video');
-                    var startTime = {start_time};
-                    var endTime = {end_time};
-
-                    video.addEventListener('play', function() {{
-                        this.currentTime = startTime;
-                    }});
-
-                    video.addEventListener('timeupdate', function() {{
-                        if (this.currentTime >= endTime) {{
-                            this.pause();
-                        }}
-                    }});
-                }})();
+                document.getElementById('video-{i}').addEventListener('loadedmetadata', function() {{
+                    this.currentTime = {start_time};
+                }});
             </script>
-            <p><strong>Relevance Score:</strong> {clip['score']:.2f}</p>
-            <p><strong>AI Description:</strong> {description}</p>
+            <p class="relevance-score"><strong>Relevance Score:</strong> {clip['score']:.2f}</p>
+            <div class="description">
+                <strong>AI Description:</strong>
+                <p>{description}</p>
+            </div>
             <div class="comments">
-                <h4>Comments</h4>
-                <!-- Comments would be dynamically added here -->
-                <div class="comment">
-                    <p><strong>User1:</strong> This part was really challenging!</p>
-                </div>
+                <h4>Comments:</h4>
+                <p><strong>User1:</strong> This part was really challenging!</p>
             </div>
         </div>
         """
@@ -352,8 +344,13 @@ def generate_scenario_page(prompt, search_results, descriptions):
     </body>
     </html>
     """
-    return html_content
 
+    # Provide an option to download the scenario page
+    b64 = base64.b64encode(html_content.encode()).decode()
+    href = f'<a href="data:text/html;base64,{b64}" download="scenario_page.html">Download Scenario Page</a>'
+    st.markdown(href, unsafe_allow_html=True)
+
+    return "Scenario page generated successfully!"
 
 def main():
     st.title("Gaming Scenario Generator")
@@ -435,23 +432,31 @@ def main():
             # Generate detailed descriptions for each clip
             descriptions = []
             for clip in search_results:
+                prompt = f"""Analyze the video clip from {clip['start']} to {clip['end']} seconds and create a structured summary:
+
+1. Start with a bold title explaining the main focus.
+2. Provide a concise description of key events (2-3 sentences).
+3. Use 2-3 labeled sub-topics (e.g., "Strategy:", "Key Items:") for organization.
+4. Highlight crucial controls in [brackets] if applicable.
+5. Mention any unique player insights or tips.
+6. Note 1-2 notable game mechanics or abilities if relevant.
+7. End with a brief "Key Takeaway:".
+8. Make sure to label the timestamp start and end time for each relavnt clip in the description so the user knows what duration of the whole clip is relevant.
+
+
+Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
+
+Context: {search_prompt}
+"""
                 description = generate_open_ended_text(
                     st.session_state['video_id'],
-                    prompt=f"Provide a detailed description of this clip from {clip['start']} to {clip['end']} seconds in the context of: {search_prompt}. Include relevant gameplay elements, strategies, or key events."
+                    prompt=prompt
                 )
                 descriptions.append(description)
 
-            # Generate HTML content for the scenario page
-            html_content = generate_scenario_page(search_prompt, search_results, descriptions)
-
-            # Display the scenario page
-            st.subheader("Generated Scenario Page")
-            st.components.v1.html(html_content, height=800, scrolling=True)
-
-            # Provide an option to download the scenario page
-            b64 = base64.b64encode(html_content.encode()).decode()
-            href = f'<a href="data:text/html;base64,{b64}" download="scenario_page.html">Download Scenario Page</a>'
-            st.markdown(href, unsafe_allow_html=True)
+            # Generate and display the scenario page
+            result = generate_scenario_page(search_prompt, search_results, descriptions)
+            st.success(result)
 
 if __name__ == "__main__":
     main()
