@@ -246,6 +246,14 @@ def summarize_chat_history(chat_history):
     - Not exceed 76 tokens
     - Frame the content for a wiki-style or scenario-based gaming page
     - Highlight crucial user inputs for accurate video clip retrieval
+    - Emphasize the importance of maintaining chronological order in the video clips
+    - Include language that encourages sequential progression through the game or scenario
+
+    Ensure the summary search prompt promotes a chronological flow of events based on the chat history info, using phrases like:
+    - "From the beginning of the game..."
+    - "As the gameplay progresses..."
+    - "Moving on to the next stage..."
+    - "In the final part of the scenario..."
 
     Chat History:
     """
@@ -257,7 +265,7 @@ def summarize_chat_history(chat_history):
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that summarizes chat histories into search prompts for video game scenario pages."},
+                {"role": "system", "content": "You are a helpful assistant that summarizes chat histories into search prompts for video game scenario pages, emphasizing chronological order and sequential progression."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=76
@@ -441,7 +449,7 @@ def main():
 5. Mention any unique player insights or tips.
 6. Note 1-2 notable game mechanics or abilities if relevant.
 7. End with a brief "Key Takeaway:".
-8. Make sure to label the timestamp start and end time for each relavnt clip in the description so the user knows what duration of the whole clip is relevant.
+8. Make sure to label the timestamp start and end time in second and minutes for each relavnt clip in the description so the user knows what duration of the whole clip is relevant.
 
 
 Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
