@@ -9,6 +9,9 @@ from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 from twelvelabs import APIStatusError, AuthenticationError
 from twelvelabs.models.embed import EmbeddingsTask
 from openai import OpenAI
+from googleapiclient.discovery import build
+import re
+
 
 # Load environment variables
 load_dotenv("Atlantis.env")
@@ -20,6 +23,12 @@ TWELVE_LABS_API_KEY = os.getenv('TWELVE_LABS_API_KEY')
 client = TwelveLabs(api_key=TWELVE_LABS_API_KEY)
 
 openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+GOOGLE_CSE_ID = os.getenv('GOOGLE_CSE_ID')
+
+google_service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+
 
 # Streamlit session state initialization
 if 'video_index_id' not in st.session_state:
@@ -185,19 +194,106 @@ def retrieve_embeddings(task_id):
         st.error(f"Failed to retrieve embeddings: {str(e)}")
         return None
 
-def retrieve_embeddings(task_id):
-    try:
-        task = client.embed.task.retrieve(task_id)
-        if task.video_embeddings is not None:
-            st.success("Retrieved video embeddings successfully")
-            return task.video_embeddings
-        else:
-            st.warning("No embeddings found for the task")
-            return None
-    except Exception as e:
-        st.error(f"Failed to retrieve embeddings: {str(e)}")
-        return None
 
+
+def google_search(query):
+    try:
+        res = google_service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=5).execute()
+        return res.get('items', [])
+    except Exception as e:
+        st.error(f"Error performing Google search: {str(e)}")
+        return []
+
+def get_embeddings(texts):
+    try:
+        response = openai_client.embeddings.create(
+            input=texts,
+            model="text-embedding-ada-002"
+        )
+        embeddings = [e.embedding for e in response.data]
+        return embeddings
+    except Exception as e:
+        st.error(f"Error generating embeddings: {str(e)}")
+        return []
+
+def retrieve_relevant_documents(query, texts):
+    query_embedding = get_embeddings([query])[0]
+    doc_embeddings = get_embeddings(texts)
+    similarities = [cosine_similarity(query_embedding, doc_emb) for doc_emb in doc_embeddings]
+    sorted_indices = np.argsort(similarities)[::-1]
+    top_indices = sorted_indices[:3]  # Get top 3 documents
+    top_texts = [texts[i] for i in top_indices]
+    return top_texts
+
+def perform_rag_search(query):
+    search_results = google_search(query)
+    texts = [f"{item['title']}\n{item['snippet']}" for item in search_results]
+    top_texts = retrieve_relevant_documents(query, texts)
+    context = "\n\n".join(top_texts)
+    prompt = f"""
+    Use the following information to answer the question:
+    
+    Context: {context}
+    
+    Question: {query}
+    
+    Answer:
+    """
+    answer = generate_openai_text(prompt)
+    
+    # Format answer with sources
+    formatted_answer = answer + "\n\nSources:\n"
+    for item in search_results:
+        formatted_answer += f"- [{item['title']}]({item['link']})\n"
+    
+    return formatted_answer
+
+
+def generate_openai_text(prompt):
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.7,
+            n=1
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        st.error(f"Error generating text with OpenAI: {str(e)}")
+        return ""
+
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+def summarize_guide_with_links(chat_history):
+    prompt = """
+    Based on the following chat history, create a concise guide summary including:
+    1. Main objective
+    2. Key points or steps
+    3. Any important tips or warnings
+    4. Incorporate relevant links from the internet searches
+
+    Include the most relevant links directly in the summary text.
+
+    Chat History:
+    """
+    for message in chat_history:
+        prompt += f"\n{message['role'].capitalize()}: {message['content']}"
+
+    response = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that summarizes gaming guides and scenarios, incorporating relevant internet search results and links."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=300
+    )
+    return response.choices[0].message.content.strip()
 
 
 def search_video(client, index_id, prompt, video_embeddings):
@@ -304,86 +400,54 @@ def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
         st.error(f"Error extracting video clip: {str(e)}")
 
 def generate_scenario_page(prompt, search_results, descriptions):
-    st.subheader("Generated Scenario Page")
-    st.write(f"**Scenario: {prompt}**")
+    st.header(f"Scenario Page: {prompt}")
 
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Scenario Page: {prompt}</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }}
-            .clip {{ margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }}
-            .clip h3 {{ color: #333; }}
-            .relevance-score {{ font-style: italic; color: #666; }}
-            .description {{ margin-top: 10px; }}
-            .comments {{ margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }}
-            video {{ width: 100%; max-width: 600px; }}
-        </style>
-    </head>
-    <body>
-        <h1>Scenario Page</h1>
-        <h2>{prompt}</h2>
-    """
+    guide_summary = summarize_guide_with_links(st.session_state['chat_history'])
+    
+    st.subheader("Guide Summary")
+    st.markdown(guide_summary, unsafe_allow_html=True)
 
     for i, (clip, description) in enumerate(zip(search_results, descriptions), 1):
+        st.subheader(f"Clip {i}")
+        
+        # Use Streamlit's video playback
         start_time = clip['start']
+        video_file = open(st.session_state['video_file_path'], 'rb')
+        video_bytes = video_file.read()
+        st.video(video_bytes, start_time=int(start_time))
         
-        st.write(f"### Clip {i}")
+        st.markdown(f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>", unsafe_allow_html=True)
         
-        # Use Streamlit's video component for display in the app
-        st.video(st.session_state['video_file_path'], start_time=int(start_time))
+        st.markdown("<div class='description'>", unsafe_allow_html=True)
+        st.markdown("<strong>AI Description:</strong>", unsafe_allow_html=True)
+        st.markdown(description, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
         
-        st.write(f"**Relevance Score:** {clip['score']:.2f}")
-        st.write("**AI Description:**")
-        st.markdown(description)
+        st.markdown("<div class='comments'>", unsafe_allow_html=True)
+        st.markdown("<h4>Comments:</h4>", unsafe_allow_html=True)
+        st.markdown("<p><strong>User1:</strong> This part was really challenging!</p>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
         
-        st.write("**Comments**")
-        st.write("User1: This part was really challenging!")
-        
-        st.write("---")
+        st.markdown("<hr>", unsafe_allow_html=True)  # Add a separator between clips
 
-        # Add content to the HTML for download
-        html_content += f"""
-        <div class="clip">
-            <h3>Clip {i}</h3>
-            <video controls id="video-{i}">
-                <source src="uploaded_video.mp4" type="video/mp4">
-                Your browser does not support the video tag.
-            </video>
-            <script>
-                document.getElementById('video-{i}').addEventListener('loadedmetadata', function() {{
-                    this.currentTime = {start_time};
-                }});
-            </script>
-            <p class="relevance-score"><strong>Relevance Score:</strong> {clip['score']:.2f}</p>
-            <div class="description">
-                <strong>AI Description:</strong>
-                <p>{description}</p>
-            </div>
-            <div class="comments">
-                <h4>Comments:</h4>
-                <p><strong>User1:</strong> This part was really challenging!</p>
-            </div>
-        </div>
-        """
+    # Add custom CSS to maintain styling
+    st.markdown("""
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .guide-summary { background-color: #f0f0f0; padding: 15px; margin-bottom: 20px; border-left: 5px solid #333; }
+        .clip { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }
+        .clip h3 { color: #333; }
+        .relevance-score { font-style: italic; color: #666; }
+        .description { margin-top: 10px; }
+        .comments { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }
+        video { width: 100%; max-width: 600px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-    html_content += """
-    </body>
-    </html>
-    """
-
-    # Provide an option to download the scenario page
-    b64 = base64.b64encode(html_content.encode()).decode()
-    href = f'<a href="data:text/html;base64,{b64}" download="scenario_page.html">Download Scenario Page</a>'
-    st.markdown(href, unsafe_allow_html=True)
-
-    return "Scenario page generated successfully!"
+    # No need to return HTML content as we're directly rendering with Streamlit
 
 def main():
-    st.title("Gaming Scenario Generator")
+    st.title("Gaming Wiki Page Generator")
 
     # Step 1: Video Upload
     st.header("Upload Your Gameplay Video")
@@ -419,25 +483,31 @@ def main():
                 st.text_area("Video Gist", gist, height=150)
 
     # Step 3: Chatbot Interaction
-    if st.session_state['video_id'] is not None:
-        st.header("Chat with the Assistant to Create Your Scenario")
-        st.write("You can discuss with the assistant to refine your scenario based on the video content.")
+    st.header("Chat with the Assistant")
+    st.write("You can discuss your gaming guide info, ask about the video, or request internet searches.")
 
-        # Display chat history
-        for msg in st.session_state['chat_history']:
-            if msg['role'] == 'assistant':
-                st.markdown(f"**Assistant**: {msg['content']}")
-            else:
-                st.markdown(f"**You**: {msg['content']}")
+    # Display chat history
+    for msg in st.session_state['chat_history']:
+        if msg['role'] == 'assistant':
+            st.markdown(f"**Assistant**: {msg['content']}")
+        else:
+            st.markdown(f"**You**: {msg['content']}")
 
-        user_input = st.text_input("Your message:")
-        if st.button("Send") and user_input:
-            with st.spinner("Assistant is typing..."):
+    user_input = st.text_input("Your message:")
+    search_type = st.radio("Search type:", ["Video", "Internet"])
+
+    if st.button("Send") and user_input:
+        with st.spinner("Assistant is typing..."):
+            if search_type == "Video" and st.session_state['video_id'] is not None:
                 assistant_reply = chat_with_bot(user_input)
-                st.markdown(f"**Assistant**: {assistant_reply}")
+            else:
+                assistant_reply = perform_rag_search(user_input)
+            st.markdown(f"**Assistant**: {assistant_reply}")
+            st.session_state['chat_history'].append({"role": "user", "content": user_input})
+            st.session_state['chat_history'].append({"role": "assistant", "content": assistant_reply})
 
     # Step 4: Generate Scenario Page
-    if st.button("Generate Scenario") and len(st.session_state['chat_history']) > 0:
+    if st.button("Generate Page") and len(st.session_state['chat_history']) > 0:
         with st.spinner("Processing..."):
             # Summarize the chat history for search
             search_prompt = summarize_chat_history(st.session_state['chat_history'])
@@ -471,8 +541,7 @@ def main():
 5. Mention any unique player insights or tips.
 6. Note 1-2 notable game mechanics or abilities if relevant.
 7. End with a brief "Key Takeaway:".
-8. Make sure to label the timestamp start and end time in second and minutes for each relavnt clip in the description so the user knows what duration of the whole clip is relevant.
-
+8. Make sure to label the timestamp start and end time in second and minutes for each relevant clip in the description so the user knows what duration of the whole clip is relevant.
 
 Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
 
@@ -484,9 +553,10 @@ Context: {search_prompt}
                 )
                 descriptions.append(description)
 
-            # Generate and display the scenario page
-            result = generate_scenario_page(search_prompt, search_results, descriptions)
-            st.success(result)
+            # Generate and display the scenario page using Streamlit components
+            generate_scenario_page(search_prompt, search_results, descriptions)
+
+            st.success("Scenario page generated successfully!")
 
 if __name__ == "__main__":
     main()
