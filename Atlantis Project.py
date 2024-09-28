@@ -108,8 +108,8 @@ def chat_with_bot(user_input):
     try:
         messages = st.session_state['chat_history']
         messages.append({"role": "user", "content": user_input})
+        is_first_answer = len(messages) == 1
 
-        # Search for relevant content in the video
         if 'video_embeddings' in st.session_state:
             search_results = search_video(
                 client,
@@ -121,38 +121,50 @@ def chat_with_bot(user_input):
             st.error("Video embeddings not found. Please ensure the video is properly processed.")
             return "I'm sorry, but I couldn't find the video embeddings. Please make sure the video has been properly processed."
 
-        # Generate a summary based on the search results
         if search_results:
-            # Create a context from the top 5 search results, but limit the length
+            # Sort search results by start time to ensure chronological order
+            search_results.sort(key=lambda x: x['start'])
+            
+            # Create context from search results in chronological order
             context = ""
             for result in search_results[:5]:
-                summary = generate_open_ended_text(
-                    st.session_state['video_id'],
-                    f'Summarize the key points from {result["start"]} to {result["end"]} seconds in about 75 words.'
-                )
-                context += f"From {result['start']} to {result['end']} seconds: {summary}\n\n"
-                if len(context) > 900:  # Increased context length
-                    break
-            
-            prompt = f"""Based on the following video content:
+                context += f"From {result['start']} to {result['end']} seconds (score: {result['score']:.2f})\n"
+
+            # Use the context to generate the open-ended text
+            prompt = f"""Based on the following video segments:
 
 {context}
 
+{'Identify the game being played and the specific level or guide shown in this video, then ' if is_first_answer else ''}
 Respond to this user message in detail (about 200-250 words):
 {user_input}
 
 Include specific references to the video content where relevant, and provide a comprehensive answer that covers the main points while still being concise."""
-            
-            response_text = generate_open_ended_text(
-                video_id=st.session_state['video_id'],
-                prompt=prompt
-            )
-        else:
-            response_text = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
 
-        messages.append({"role": "assistant", "content": response_text})
+            twelve_labs_response = generate_open_ended_text(
+                video_id=st.session_state['video_id'],
+                prompt=prompt,
+                is_first_answer=is_first_answer
+            )
+
+            if is_first_answer:
+                # Split the response into lines
+                response_lines = twelve_labs_response.split('\n')
+                # Extract game and level info
+                game_info = '\n'.join(response_lines[:2])
+                # The actual answer starts from the third line
+                answer = '\n'.join(response_lines[2:])
+            else:
+                game_info = ""
+                answer = twelve_labs_response
+
+            enhanced_response = chatgpt_rag_analysis(user_input, answer, game_info)
+        else:
+            enhanced_response = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
+
+        messages.append({"role": "assistant", "content": enhanced_response})
         st.session_state['chat_history'] = messages
-        return response_text
+        return enhanced_response
     except Exception as e:
         st.error(f"Error during chatbot conversation: {str(e)}")
         return "I'm sorry, but an error occurred while processing your request. Please try again or rephrase your question."
@@ -229,6 +241,13 @@ def perform_rag_search(query):
     search_results = google_search(query)
     texts = [f"{item['title']}\n{item['snippet']}" for item in search_results]
     top_texts = retrieve_relevant_documents(query, texts)
+    
+    # Format results with sources
+    formatted_results = "RAG Search Results:\n"
+    for i, text in enumerate(top_texts, 1):
+        original_item = next(item for item in search_results if f"{item['title']}\n{item['snippet']}" == text)
+        formatted_results += f"{i}. {text}\nSource: [{original_item['title']}]({original_item['link']})\n\n"
+    
     context = "\n\n".join(top_texts)
     prompt = f"""
     Use the following information to answer the question:
@@ -246,8 +265,55 @@ def perform_rag_search(query):
     for item in search_results:
         formatted_answer += f"- [{item['title']}]({item['link']})\n"
     
-    return formatted_answer
+    return formatted_answer, formatted_results
 
+
+def chatgpt_rag_analysis(question, twelve_labs_result, game_info):
+    try:
+        # Perform RAG search
+        rag_answer, rag_results = perform_rag_search(question)
+        
+        # Get the chat history
+        chat_history = st.session_state.get('chat_history', [])
+        history_context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history[-5:]])
+        
+        prompt = f"""
+        You are an AI assistant specializing in video game knowledge. You've been given a question, an initial answer about a game, and additional context from RAG and chat history. Your task is to:
+
+        1. Analyze the initial answer from the video-based AI.
+        2. Identify any missing information or gaps in the explanation.
+        3. Fill in these gaps using the RAG results and your knowledge of the game, but do not alter the original description.
+        4. Consider the chat history for context.
+        5. Provide a comprehensive response that combines the original answer with your additional insights.
+
+        Game Information: {game_info}
+        Question: {question}
+        Initial Answer from Video: {twelve_labs_result}
+        
+        RAG Answer: {rag_answer}
+        RAG Results:
+        {rag_results}
+        
+        Recent Chat History:
+        {history_context}
+
+        Please provide an enhanced response:
+        """
+
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a knowledgeable gaming assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.7,
+            n=1
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        st.error(f"Error in ChatGPT RAG analysis: {str(e)}")
+        return twelve_labs_result  # Return the original result if there's an error
 
 def generate_openai_text(prompt):
     try:
@@ -325,13 +391,33 @@ def search_video(client, index_id, prompt, video_embeddings):
                 'embedding_scope': video_embedding.embedding_scope
             })
 
-        # Sort results by a combination of similarity score and chronological order
-        # This creates a tuple (score, -start) for each result
-        # Sorting by this tuple prioritizes higher scores and earlier start times
-        results.sort(key=lambda x: (x['score'], -x['start']), reverse=True)
+        # Sort results by score (highest to lowest)
+        results.sort(key=lambda x: x['score'], reverse=True)
 
-        # Return top 10 results
-        return results[:10]
+        # Filter out overlapping clips
+        filtered_results = []
+        video_duration = max(result['end'] for result in results)
+        min_clip_duration = 10  # Minimum duration of a clip in seconds
+        max_clips = max(5, int(video_duration / 30))  # At least 5 clips, or more for longer videos
+
+        for result in results:
+            overlap = False
+            for filtered_result in filtered_results:
+                if (result['start'] < filtered_result['end'] and result['end'] > filtered_result['start']) or \
+                   (abs(result['start'] - filtered_result['start']) < min_clip_duration):
+                    overlap = True
+                    break
+            if not overlap and len(filtered_results) < max_clips:
+                filtered_results.append(result)
+
+            # Break if we have covered the entire video duration
+            if len(filtered_results) >= max_clips and filtered_results[-1]['end'] >= video_duration * 0.9:
+                break
+
+        # Sort the filtered results chronologically
+        filtered_results.sort(key=lambda x: x['start'])
+
+        return filtered_results
     except Exception as e:
         st.error(f"Failed to search video: {str(e)}")
         st.error(f"Error details: {type(e).__name__}, {str(e)}")
@@ -341,13 +427,18 @@ def search_video(client, index_id, prompt, video_embeddings):
 
 
 
-def generate_open_ended_text(video_id, prompt):
+def generate_open_ended_text(video_id, prompt, is_first_answer=False):
     try:
+        if is_first_answer:
+            full_prompt = f"Identify the game being played and the specific level or guide shown in this video only in the first response to the user, then answer the following question: {prompt}"
+        else:
+            full_prompt = prompt
+
         res = client.generate.text(
             video_id=video_id,
-            prompt=prompt,
-            temperature=0.7,  # Optional, defaults to 0.7 if not specified
-            stream=False  # Optional, defaults to false if not specified
+            prompt=full_prompt,
+            temperature=0.1,  # Set to a very low temperature for factual responses
+            stream=False
         )
         return res.data
     except Exception as e:
