@@ -11,6 +11,7 @@ from twelvelabs.models.embed import EmbeddingsTask
 from openai import OpenAI
 from googleapiclient.discovery import build
 import re
+import difflib
 
 
 # Load environment variables
@@ -490,49 +491,137 @@ def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
     except Exception as e:
         st.error(f"Error extracting video clip: {str(e)}")
 
+
+
+
+def calculate_similarity(str1, str2):
+    return difflib.SequenceMatcher(None, str1, str2).ratio()
+
 def generate_scenario_page(prompt, search_results, descriptions):
     st.header(f"Scenario Page: {prompt}")
-
     guide_summary = summarize_guide_with_links(st.session_state['chat_history'])
-    
     st.subheader("Guide Summary")
     st.markdown(guide_summary, unsafe_allow_html=True)
 
-    for i, (clip, description) in enumerate(zip(search_results, descriptions), 1):
-        st.subheader(f"Clip {i}")
-        
-        # Use Streamlit's video playback
-        start_time = clip['start']
-        video_file = open(st.session_state['video_file_path'], 'rb')
-        video_bytes = video_file.read()
-        st.video(video_bytes, start_time=int(start_time))
-        
-        st.markdown(f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>", unsafe_allow_html=True)
-        
-        st.markdown("<div class='description'>", unsafe_allow_html=True)
-        st.markdown("<strong>AI Description:</strong>", unsafe_allow_html=True)
-        st.markdown(description, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.markdown("<div class='comments'>", unsafe_allow_html=True)
-        st.markdown("<h4>Comments:</h4>", unsafe_allow_html=True)
-        st.markdown("<p><strong>User1:</strong> This part was really challenging!</p>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        st.markdown("<hr>", unsafe_allow_html=True)  # Add a separator between clips
+    displayed_descriptions = []
+    similarity_threshold = 0.8  # Adjust this value to change sensitivity
 
-    # Add custom CSS to maintain styling
+    for i, (clip, description) in enumerate(zip(search_results, descriptions), 1):
+        is_unique = True
+        for displayed_description in displayed_descriptions:
+            if calculate_similarity(description, displayed_description) > similarity_threshold:
+                is_unique = False
+                break
+        
+        if is_unique:
+            displayed_descriptions.append(description)
+
+            st.subheader(f"Clip {i}")
+            # Use Streamlit's video playback
+            start_time = clip['start']
+            video_file = open(st.session_state['video_file_path'], 'rb')
+            video_bytes = video_file.read()
+            st.video(video_bytes, start_time=int(start_time))
+            st.markdown(f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>", unsafe_allow_html=True)
+            st.markdown("<div class='description'>", unsafe_allow_html=True)
+            st.markdown("<strong>AI Description:</strong>", unsafe_allow_html=True)
+            st.markdown(description, unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<div class='comments'>", unsafe_allow_html=True)
+            st.markdown("<h4>Comments:</h4>", unsafe_allow_html=True)
+            st.markdown("<p><strong>User1:</strong> This part was really challenging!</p>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<hr>", unsafe_allow_html=True) # Add a separator between clips
+
+    # Add Q&A section for the entire video
+    st.subheader("Ask a question about this video")
+    with st.form(key='qa_form'):
+        user_question = st.text_input("Your question about the video")
+        submit_button = st.form_submit_button(label='Get Answer')
+
+    if submit_button and user_question:
+        with st.spinner("Generating answer..."):
+            if 'video_embeddings' in st.session_state:
+                video_search_results = search_video(
+                    client,
+                    st.session_state['video_index_id'],
+                    user_question,
+                    st.session_state['video_embeddings']
+                )
+                if video_search_results:
+                    video_search_results.sort(key=lambda x: x['start'])
+                    context = ""
+                    for result in video_search_results[:5]:
+                        context += f"From {result['start']} to {result['end']} seconds (score: {result['score']:.2f})\n"
+                    
+                    prompt = f"""Based on the following video segments:
+
+{context}
+
+Respond to this user message in detail (about 200-250 words):
+{user_question}
+
+Include specific references to the video content where relevant, and provide a comprehensive answer that covers the main points while still being concise."""
+
+                    twelve_labs_response = generate_open_ended_text(
+                        video_id=st.session_state['video_id'],
+                        prompt=prompt,
+                        is_first_answer=False
+                    )
+                    
+                    answer = chatgpt_rag_analysis(user_question, twelve_labs_response, "")
+                else:
+                    answer = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
+            else:
+                answer = "I'm sorry, but I couldn't find the video embeddings. Please make sure the video has been properly processed."
+
+            st.markdown(f"<strong>Question:</strong> {user_question}", unsafe_allow_html=True)
+            st.markdown(f"<strong>Answer:</strong> {answer}", unsafe_allow_html=True)
+
+    # Add floating search bar
+    st.markdown("""
+    <div class="floating-search">
+        <input type="text" id="floating-search-input" placeholder="Ask about the video...">
+        <button onclick="searchVideo()">Ask</button>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Add custom CSS to maintain styling and add floating search bar
     st.markdown("""
     <style>
         body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
-        .guide-summary { background-color: #f0f0f0; padding: 15px; margin-bottom: 20px; border-left: 5px solid #333; }
+        .guide-summary { background-color: #f0f0f1; padding: 15px; margin-bottom: 20px; border-left: 5px solid #333; }
         .clip { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }
         .clip h3 { color: #333; }
         .relevance-score { font-style: italic; color: #666; }
         .description { margin-top: 10px; }
         .comments { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }
         video { width: 100%; max-width: 600px; }
+        .floating-search {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+        #floating-search-input {
+            width: 300px;
+            padding: 5px;
+            margin-right: 10px;
+        }
     </style>
+    <script>
+    function searchVideo() {
+        var question = document.getElementById('floating-search-input').value;
+        // You'll need to implement a way to trigger the Streamlit app to process this question
+        // This might involve using Streamlit's component communication or other methods
+        alert('Asking: ' + question);
+    }
+    </script>
     """, unsafe_allow_html=True)
 
     # No need to return HTML content as we're directly rendering with Streamlit
@@ -598,56 +687,61 @@ def main():
             st.session_state['chat_history'].append({"role": "assistant", "content": assistant_reply})
 
     # Step 4: Generate Scenario Page
-    if st.button("Generate Page") and len(st.session_state['chat_history']) > 0:
-        with st.spinner("Processing..."):
-            # Summarize the chat history for search
-            search_prompt = summarize_chat_history(st.session_state['chat_history'])
-            st.write("Search Prompt:", search_prompt)  # Display the search prompt (you can remove this line later)
+    if 'generate_page' not in st.session_state:
+        st.session_state['generate_page'] = False
 
-            # Search for relevant clips using the summarized search prompt and embeddings
-            if 'video_embeddings' in st.session_state:
-                search_results = search_video(
-                    client,
-                    st.session_state['video_index_id'], 
-                    search_prompt, 
-                    st.session_state['video_embeddings']
-                )
-            else:
-                st.error("Video embeddings not found. Please ensure the video is properly processed.")
-                return
+    if st.button("Generate Page") or st.session_state['generate_page']:
+        st.session_state['generate_page'] = True
+        if len(st.session_state['chat_history']) > 0:
+            with st.spinner("Processing..."):
+                # Summarize the chat history for search
+                search_prompt = summarize_chat_history(st.session_state['chat_history'])
+                st.write("Search Prompt:", search_prompt)  # Display the search prompt (you can remove this line later)
 
-            if not search_results:
-                st.warning("No relevant clips found.")
-                return
+                # Search for relevant clips using the summarized search prompt and embeddings
+                if 'video_embeddings' in st.session_state:
+                    search_results = search_video(
+                        client,
+                        st.session_state['video_index_id'], 
+                        search_prompt, 
+                        st.session_state['video_embeddings']
+                    )
+                else:
+                    st.error("Video embeddings not found. Please ensure the video is properly processed.")
+                    return
 
-            # Generate detailed descriptions for each clip
-            descriptions = []
-            for clip in search_results:
-                prompt = f"""Analyze the video clip from {clip['start']} to {clip['end']} seconds and create a structured summary:
+                if not search_results:
+                    st.warning("No relevant clips found.")
+                    return
 
-1. Start with a bold title explaining the main focus.
-2. Provide a concise description of key events (2-3 sentences).
-3. Use 2-3 labeled sub-topics (e.g., "Strategy:", "Key Items:") for organization.
-4. Highlight crucial controls in [brackets] if applicable.
-5. Mention any unique player insights or tips.
-6. Note 1-2 notable game mechanics or abilities if relevant.
-7. End with a brief "Key Takeaway:".
-8. Make sure to label the timestamp start and end time in second and minutes for each relevant clip in the description so the user knows what duration of the whole clip is relevant.
+                # Generate detailed descriptions for each clip
+                descriptions = []
+                for clip in search_results:
+                    prompt = f"""Analyze the video clip from {clip['start']} to {clip['end']} seconds and create a structured summary:
 
-Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
+    1. Start with a bold title explaining the main focus.
+    2. Provide a concise description of key events (2-3 sentences).
+    3. Use 2-3 labeled sub-topics (e.g., "Strategy:", "Key Items:") for organization.
+    4. Highlight crucial controls in [brackets] if applicable.
+    5. Mention any unique player insights or tips.
+    6. Note 1-2 notable game mechanics or abilities if relevant.
+    7. End with a brief "Key Takeaway:".
+    8. Make sure to label the timestamp start and end time in second and minutes for each relevant clip in the description so the user knows what duration of the whole clip is relevant.
 
-Context: {search_prompt}
-"""
-                description = generate_open_ended_text(
-                    st.session_state['video_id'],
-                    prompt=prompt
-                )
-                descriptions.append(description)
+    Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
 
-            # Generate and display the scenario page using Streamlit components
-            generate_scenario_page(search_prompt, search_results, descriptions)
+    Context: {search_prompt}
+    """
+                    description = generate_open_ended_text(
+                        st.session_state['video_id'],
+                        prompt=prompt
+                    )
+                    descriptions.append(description)
 
-            st.success("Scenario page generated successfully!")
+                # Generate and display the scenario page using Streamlit components
+                generate_scenario_page(search_prompt, search_results, descriptions)
+
+                st.success("Wiki page generated successfully!")
 
 if __name__ == "__main__":
     main()
