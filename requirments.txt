@@ -1,0 +1,7 @@
+streamlit
+numpy
+python-dotenv
+moviepy
+openai
+google-api-python-client
+twelve-labs
