@@ -12,7 +12,9 @@ from openai import OpenAI
 from googleapiclient.discovery import build
 import re
 import difflib
-
+import sqlite3
+import json
+import uuid
 
 # Load environment variables
 load_dotenv("Atlantis.env")
@@ -29,6 +31,14 @@ GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 GOOGLE_CSE_ID = os.getenv('GOOGLE_CSE_ID')
 
 google_service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+
+def init_db():
+    conn = sqlite3.connect('wiki_pages.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS pages
+                 (id TEXT PRIMARY KEY, content TEXT)''')
+    conn.commit()
+    conn.close()
 
 
 # Streamlit session state initialization
@@ -538,11 +548,21 @@ def generate_scenario_page(prompt, search_results, descriptions):
             
             st.markdown(st.session_state[description_key], unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("<div class='comments'>", unsafe_allow_html=True)
-            st.markdown("<h4>Comments:</h4>", unsafe_allow_html=True)
-            st.markdown("<p><strong>User1:</strong> This part was really challenging!</p>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("<hr>", unsafe_allow_html=True) # Add a separator between clips
+
+            # Add user content section
+            st.subheader("Add Your Content")
+            user_text = st.text_area("Add your text", key=f"user_text_{i}")
+            user_link = st.text_input("Paste a link", key=f"user_link_{i}")
+            user_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"], key=f"user_image_{i}")
+
+            if user_text:
+                st.markdown(f"<div class='user-content'><p>{user_text}</p></div>", unsafe_allow_html=True)
+            if user_link:
+                st.markdown(f"<div class='user-content'><a href='{user_link}' target='_blank'>{user_link}</a></div>", unsafe_allow_html=True)
+            if user_image:
+                st.image(user_image, caption="User uploaded image")
+
+            st.markdown("<hr>", unsafe_allow_html=True)
 
     # Add Q&A section for the entire video
     st.subheader("Ask a question about this video")
@@ -588,6 +608,17 @@ Include specific references to the video content where relevant, and provide a c
 
             st.markdown(f"<strong>Question:</strong> {user_question}", unsafe_allow_html=True)
             st.markdown(f"<strong>Answer:</strong> {answer}", unsafe_allow_html=True)
+
+    # Add publish button
+    if st.button("Publish Page"):
+        page_id = str(uuid.uuid4())
+        page_content = {
+            "prompt": prompt,
+            "guide_summary": guide_summary,
+            "clips": [{"clip": clip, "description": st.session_state[f"description_{i}"]} for i, clip in enumerate(search_results, 1)]
+        }
+        save_page(page_id, page_content)
+        st.success(f"Page published! Share this link: https://your-app-url.com/?page_id={page_id}")
 
     # Add floating search bar
     st.markdown("""
@@ -635,9 +666,40 @@ Include specific references to the video content where relevant, and provide a c
     </script>
     """, unsafe_allow_html=True)
 
-    # No need to return HTML content as we're directly rendering with Streamlit
+def save_page(page_id, content):
+    conn = sqlite3.connect('wiki_pages.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO pages (id, content) VALUES (?, ?)",
+              (page_id, json.dumps(content)))
+    conn.commit()
+    conn.close()
+
+def get_page(page_id):
+    conn = sqlite3.connect('wiki_pages.db')
+    c = conn.cursor()
+    c.execute("SELECT content FROM pages WHERE id = ?", (page_id,))
+    result = c.fetchone()
+    conn.close()
+    return json.loads(result[0]) if result else None
 
 def main():
+    init_db()  # Initialize the database
+
+    # Check if a page_id is provided in the URL
+    params = st.experimental_get_query_params()
+    if 'page_id' in params:
+        page_id = params['page_id'][0]
+        page_content = get_page(page_id)
+        if page_content:
+            generate_scenario_page(
+                prompt=page_content['prompt'],
+                search_results=[clip_info['clip'] for clip_info in page_content['clips']],
+                descriptions=[clip_info['description'] for clip_info in page_content['clips']]
+            )
+        else:
+            st.error("Page not found.")
+        return
+
     st.title("Gaming Wiki Page Generator")
 
     # Step 1: Video Upload
