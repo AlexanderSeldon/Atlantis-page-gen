@@ -525,7 +525,18 @@ def generate_scenario_page(prompt, search_results, descriptions):
             st.markdown(f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>", unsafe_allow_html=True)
             st.markdown("<div class='description'>", unsafe_allow_html=True)
             st.markdown("<strong>AI Description:</strong>", unsafe_allow_html=True)
-            st.markdown(description, unsafe_allow_html=True)
+            
+            # Add edit functionality for description
+            description_key = f"description_{i}"
+            if description_key not in st.session_state:
+                st.session_state[description_key] = description
+            
+            edited_description = st.text_area("Edit Description", st.session_state[description_key], key=f"edit_{i}")
+            if st.button("Save Changes", key=f"save_{i}"):
+                st.session_state[description_key] = edited_description
+                st.success("Changes saved successfully!")
+            
+            st.markdown(st.session_state[description_key], unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
             st.markdown("<div class='comments'>", unsafe_allow_html=True)
             st.markdown("<h4>Comments:</h4>", unsafe_allow_html=True)
