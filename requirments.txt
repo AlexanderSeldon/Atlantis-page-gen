@@ -1,5 +1,5 @@
-streamlit==1.39.0
-numpy==2.1.1
+streamlit
+numpy
 python-dotenv
 moviepy
 openai
