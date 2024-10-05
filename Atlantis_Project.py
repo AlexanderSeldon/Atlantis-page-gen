@@ -508,7 +508,7 @@ def calculate_similarity(str1, str2):
     return difflib.SequenceMatcher(None, str1, str2).ratio()
 
 def generate_scenario_page(prompt, search_results, descriptions):
-    st.header(f"Scenario Page: {prompt}")
+    st.header("Wiki Page")
     guide_summary = summarize_guide_with_links(st.session_state['chat_history'])
     st.subheader("Guide Summary")
     st.markdown(guide_summary, unsafe_allow_html=True)
@@ -542,25 +542,47 @@ def generate_scenario_page(prompt, search_results, descriptions):
                 st.session_state[description_key] = description
             
             edited_description = st.text_area("Edit Description", st.session_state[description_key], key=f"edit_{i}")
-            if st.button("Save Changes", key=f"save_{i}"):
+            if st.button("Save AI Description Changes", key=f"save_ai_{i}"):
                 st.session_state[description_key] = edited_description
-                st.success("Changes saved successfully!")
+                st.success("AI Description changes saved successfully!")
             
             st.markdown(st.session_state[description_key], unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Add user content section
+            # Add user content section with save functionality
             st.subheader("Add Your Content")
-            user_text = st.text_area("Add your text", key=f"user_text_{i}")
-            user_link = st.text_input("Paste a link", key=f"user_link_{i}")
-            user_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"], key=f"user_image_{i}")
+            
+            # User text
+            user_text_key = f"user_text_{i}"
+            if user_text_key not in st.session_state:
+                st.session_state[user_text_key] = ""
+            user_text = st.text_area("Add your text", value=st.session_state[user_text_key], key=f"input_{user_text_key}")
+            
+            # User link
+            user_link_key = f"user_link_{i}"
+            if user_link_key not in st.session_state:
+                st.session_state[user_link_key] = ""
+            user_link = st.text_input("Paste a link", value=st.session_state[user_link_key], key=f"input_{user_link_key}")
+            
+            # User image
+            user_image_key = f"user_image_{i}"
+            user_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"], key=f"upload_{user_image_key}")
+            
+            # Save user content button
+            if st.button("Save User Content", key=f"save_user_{i}"):
+                st.session_state[user_text_key] = user_text
+                st.session_state[user_link_key] = user_link
+                if user_image is not None:
+                    st.session_state[user_image_key] = user_image
+                st.success("User content saved successfully!")
 
-            if user_text:
-                st.markdown(f"<div class='user-content'><p>{user_text}</p></div>", unsafe_allow_html=True)
-            if user_link:
-                st.markdown(f"<div class='user-content'><a href='{user_link}' target='_blank'>{user_link}</a></div>", unsafe_allow_html=True)
-            if user_image:
-                st.image(user_image, caption="User uploaded image")
+            # Display saved user content
+            if st.session_state[user_text_key]:
+                st.markdown(f"<div class='user-content'><p>{st.session_state[user_text_key]}</p></div>", unsafe_allow_html=True)
+            if st.session_state[user_link_key]:
+                st.markdown(f"<div class='user-content'><a href='{st.session_state[user_link_key]}' target='_blank'>{st.session_state[user_link_key]}</a></div>", unsafe_allow_html=True)
+            if user_image_key in st.session_state and st.session_state[user_image_key] is not None:
+                st.image(st.session_state[user_image_key], caption="User uploaded image")
 
             st.markdown("<hr>", unsafe_allow_html=True)
 
