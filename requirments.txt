@@ -4,4 +4,4 @@ python-dotenv
 moviepy
 openai
 google-api-python-client
-twelvelabs
+twelve-labs==0.2.8
