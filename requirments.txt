@@ -1,7 +1,7 @@
-streamlit
-numpy
+streamlit==1.39.0
+numpy==2.1.1
 python-dotenv
 moviepy
 openai
 google-api-python-client
-twelvelabs
+twelvelabs==0.2.8
