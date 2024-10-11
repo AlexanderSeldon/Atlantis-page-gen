@@ -2,6 +2,7 @@ import streamlit as st
 import time
 import os
 import numpy as np
+import cv2
 from twelvelabs import TwelveLabs
 from dotenv import load_dotenv
 import base64
@@ -10,11 +11,13 @@ from twelvelabs import APIStatusError, AuthenticationError
 from twelvelabs.models.embed import EmbeddingsTask
 from openai import OpenAI
 from googleapiclient.discovery import build
+from PIL import Image
 import re
 import difflib
 import sqlite3
 import json
 import uuid
+import io
 
 # Load environment variables
 load_dotenv("Atlantis.env")
@@ -39,7 +42,6 @@ def init_db():
                  (id TEXT PRIMARY KEY, content TEXT)''')
     conn.commit()
     conn.close()
-
 
 # Streamlit session state initialization
 if 'video_index_id' not in st.session_state:
@@ -104,7 +106,6 @@ def upload_video(index_id, video_bytes):
         st.error(f"Failed to upload video: {str(e)}")
         return None
 
-
 def generate_gist(video_id, types=["title", "topic", "hashtag"]):
     try:
         res = client.generate.gist(video_id, types=types)
@@ -113,65 +114,55 @@ def generate_gist(video_id, types=["title", "topic", "hashtag"]):
         st.error(f"Error generating gist: {str(e)}")
         return ""
 
-
-
 def chat_with_bot(user_input):
     try:
         messages = st.session_state['chat_history']
         messages.append({"role": "user", "content": user_input})
         is_first_answer = len(messages) == 1
 
-        if 'video_embeddings' in st.session_state:
-            search_results = search_video(
-                client,
-                st.session_state['video_index_id'],
-                user_input,
-                st.session_state['video_embeddings']
-            )
+        # Use the open-ended text generation directly
+        prompt = f"""
+        {'Identify the game being played and the specific level or guide shown in this video, then ' if is_first_answer else ''}
+        Respond to this user message in detail (about 200-250 words):
+        {user_input}
+
+        Include specific references to the video content where relevant, and provide a comprehensive answer that covers the main points while still being concise.
+        """
+
+        twelve_labs_response = generate_open_ended_text(
+            video_id=st.session_state['video_id'],
+            prompt=prompt,
+            is_first_answer=is_first_answer
+        )
+
+        st.text("Twelve Labs Response (Debug):")
+        st.text(twelve_labs_response)  # Debug output
+
+        if is_first_answer:
+            # Split the response into lines
+            response_lines = twelve_labs_response.split('\n')
+            # Extract game and level info
+            game_info = '\n'.join(response_lines[:2])
+            # The actual answer starts from the third line
+            answer = '\n'.join(response_lines[2:])
         else:
-            st.error("Video embeddings not found. Please ensure the video is properly processed.")
-            return "I'm sorry, but I couldn't find the video embeddings. Please make sure the video has been properly processed."
+            game_info = ""
+            answer = twelve_labs_response
 
-        if search_results:
-            # Sort search results by start time to ensure chronological order
-            search_results.sort(key=lambda x: x['start'])
-            
-            # Create context from search results in chronological order
-            context = ""
-            for result in search_results[:5]:
-                context += f"From {result['start']} to {result['end']} seconds (score: {result['score']:.2f})\n"
+        # Get the gist from session state or generate it if not available
+        gist = st.session_state.get('gist', '')
+        if not gist and 'video_id' in st.session_state:
+            gist = generate_gist(st.session_state['video_id'])
+            st.session_state['gist'] = gist
 
-            # Use the context to generate the open-ended text
-            prompt = f"""Based on the following video segments:
+        st.text("Game Info (Debug):")
+        st.text(game_info)  # Debug output
 
-{context}
+        st.text("Gist (Debug):")
+        st.text(gist)  # Debug output
 
-{'Identify the game being played and the specific level or guide shown in this video, then ' if is_first_answer else ''}
-Respond to this user message in detail (about 200-250 words):
-{user_input}
-
-Include specific references to the video content where relevant, and provide a comprehensive answer that covers the main points while still being concise."""
-
-            twelve_labs_response = generate_open_ended_text(
-                video_id=st.session_state['video_id'],
-                prompt=prompt,
-                is_first_answer=is_first_answer
-            )
-
-            if is_first_answer:
-                # Split the response into lines
-                response_lines = twelve_labs_response.split('\n')
-                # Extract game and level info
-                game_info = '\n'.join(response_lines[:2])
-                # The actual answer starts from the third line
-                answer = '\n'.join(response_lines[2:])
-            else:
-                game_info = ""
-                answer = twelve_labs_response
-
-            enhanced_response = chatgpt_rag_analysis(user_input, answer, game_info)
-        else:
-            enhanced_response = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
+        # Use the twelve_labs_response as the primary content, and enhance it with RAG results
+        enhanced_response = chatgpt_rag_analysis(user_input, twelve_labs_response, game_info, messages, gist)
 
         messages.append({"role": "assistant", "content": enhanced_response})
         st.session_state['chat_history'] = messages
@@ -217,8 +208,6 @@ def retrieve_embeddings(task_id):
         st.error(f"Failed to retrieve embeddings: {str(e)}")
         return None
 
-
-
 def google_search(query):
     try:
         res = google_service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=5).execute()
@@ -248,80 +237,299 @@ def retrieve_relevant_documents(query, texts):
     top_texts = [texts[i] for i in top_indices]
     return top_texts
 
-def perform_rag_search(query):
-    search_results = google_search(query)
-    texts = [f"{item['title']}\n{item['snippet']}" for item in search_results]
-    top_texts = retrieve_relevant_documents(query, texts)
-    
-    # Format results with sources
-    formatted_results = "RAG Search Results:\n"
-    for i, text in enumerate(top_texts, 1):
-        original_item = next(item for item in search_results if f"{item['title']}\n{item['snippet']}" == text)
-        formatted_results += f"{i}. {text}\nSource: [{original_item['title']}]({original_item['link']})\n\n"
-    
-    context = "\n\n".join(top_texts)
-    prompt = f"""
-    Use the following information to answer the question:
-    
-    Context: {context}
-    
-    Question: {query}
-    
-    Answer:
-    """
-    answer = generate_openai_text(prompt)
-    
-    # Format answer with sources
-    formatted_answer = answer + "\n\nSources:\n"
-    for item in search_results:
-        formatted_answer += f"- [{item['title']}]({item['link']})\n"
-    
-    return formatted_answer, formatted_results
-
-
-def chatgpt_rag_analysis(question, twelve_labs_result, game_info):
+def perform_rag_search(query, game_info=None):
     try:
-        # Perform RAG search
-        rag_answer, rag_results = perform_rag_search(question)
-        
-        # Get the chat history
-        chat_history = st.session_state.get('chat_history', [])
-        history_context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history[-5:]])
-        
+        if game_info:
+            # Combine game information with the user's query for a more relevant search
+            search_query = f"{game_info} {query}"
+        else:
+            search_query = query
+
+        # Perform Google Search with the combined query
+        search_results = google_service.cse().list(
+            q=search_query,
+            cx=GOOGLE_CSE_ID,
+            num=10  # Increased from 5 to 10 to get more diverse results
+        ).execute()
+        items = search_results.get('items', [])
+
+        # Extract titles and snippets from the search results
+        texts = [f"{item['title']}\n{item['snippet']}" for item in items]
+
+        # Retrieve relevant documents based on the search query
+        top_texts = retrieve_relevant_documents(search_query, texts)
+
+        # Format results with sources
+        formatted_results = "RAG Search Results:\n"
+        for i, text in enumerate(top_texts, 1):
+            original_item = next(
+                (item for item in items if f"{item['title']}\n{item['snippet']}" == text),
+                None
+            )
+            if original_item:
+                formatted_results += f"{i}. {text}\nSource: [{original_item['title']}]({original_item['link']})\n\n"
+
+        # Create context for the OpenAI prompt
+        context = "\n\n".join(top_texts)
         prompt = f"""
-        You are an AI assistant specializing in video game knowledge. You've been given a question, an initial answer about a game, and additional context from RAG and chat history. Your task is to:
+You are a gaming expert tasked with providing accurate and relevant information about video games. Use the following information to answer the question:
 
-        1. Analyze the initial answer from the video-based AI.
-        2. Identify any missing information or gaps in the explanation.
-        3. Fill in these gaps using the RAG results and your knowledge of the game, but do not alter the original description.
-        4. Consider the chat history for context.
-        5. Provide a comprehensive response that combines the original answer with your additional insights.
+Context: {context}
 
-        Game Information: {game_info}
-        Question: {question}
-        Initial Answer from Video: {twelve_labs_result}
-        
-        RAG Answer: {rag_answer}
-        RAG Results:
-        {rag_results}
-        
-        Recent Chat History:
-        {history_context}
+Question: {query}
 
-        Please provide an enhanced response:
-        """
+Instructions:
+1. Provide a concise and accurate answer based on the given context.
+2. Use gaming terminology appropriate for the specific game or genre mentioned.
+3. If the context doesn't fully answer the question, clearly state what information is missing or uncertain.
+4. Include relevant examples or comparisons if they help clarify the answer.
+5. Cite specific sources when providing key information.
 
+Answer:
+"""
+        # Generate the answer using OpenAI
+        answer = generate_openai_text(prompt)
+
+        # Format the final answer with sources
+        formatted_answer = answer + "\n\nSources:\n"
+        for item in items:
+            formatted_answer += f"- [{item['title']}]({item['link']})\n"
+
+        return formatted_answer, formatted_results
+
+    except Exception as e:
+        st.error(f"Error performing RAG search: {str(e)}")
+        return "", ""
+
+def chatgpt_rag_analysis(question, twelve_labs_result, game_info, chat_history, gist):
+    try:
+        # Perform RAG search with game_info included
+        rag_answer, rag_results = perform_rag_search(question, game_info)
+
+        # Extract recent chat history
+        recent_chat = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history[-5:]])
+
+        # Combine all context
+        context = f"""
+Game Gist: {gist}
+Recent Chat History:
+{recent_chat}
+Game Information: {game_info}
+RAG Search Results: {rag_results}
+"""
+
+        enhancement_prompt = f"""
+You are an expert gaming guide writer with deep knowledge of video games, their mechanics, strategies, and terminology. Your task is to enhance a detailed gameplay description with precise gaming knowledge while maintaining its original structure and timestamps.
+
+Context:
+{context}
+
+User Question: {question}
+
+Original Gameplay Description:
+{twelve_labs_result}
+
+Your task:
+1. Identify the specific game and level/mission being played based on the description and context.
+2. Carefully analyze the original description, noting its structure, timestamps, and key points.
+3. Enhance the description by:
+   a) Integrating relevant gaming terminology and jargon from the RAG results where appropriate.
+   b) Explaining game mechanics or systems mentioned in the RAG results that are relevant to the observed gameplay.
+   c) Clarifying specific objectives, items, or strategies using information from the RAG results.
+   d) Adding any missing context or background information that would help users understand the gameplay better.
+4. Maintain the original structure, including all timestamps and the sequence of events.
+5. Ensure your response directly answers the user's question for step-by-step directions.
+6. If narration is mentioned, incorporate and expand on the narrator's instructions using gaming knowledge from the RAG results.
+7. Format the response clearly, using bullet points or numbered steps if appropriate.
+8. If there are any discrepancies between the original description and the RAG results, note them and provide clarification.
+
+Important: Only add information that is directly supported by either the original description or the RAG search results. Do not invent or assume additional details.
+
+Provide your enhanced guide below, closely following the structure of the original description and incorporating relevant information from the RAG results:
+"""
+
+        # Generate the enhanced response using OpenAI
         response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a knowledgeable gaming assistant."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "You are an expert gaming guide writer who enhances gameplay descriptions with precise gaming knowledge from RAG search results while maintaining the original structure and timestamps."
+                },
+                {"role": "user", "content": enhancement_prompt}
             ],
-            max_tokens=500,
-            temperature=0.7,
+            max_tokens=1500,  # Increased to allow for more detailed enhancements
+            temperature=0.3,  # Slightly increased for a balance between consistency and creativity
             n=1
         )
-        return response.choices[0].message.content.strip()
+
+        enhanced_response = response.choices[0].message.content.strip()
+        return enhanced_response
+
+    except Exception as e:
+        st.error(f"Error in ChatGPT RAG analysis: {str(e)}")
+        return twelve_labs_result  # Return the original result if there's an error
+
+def generate_open_ended_text(video_id, prompt, is_first_answer=False):
+    try:
+        if is_first_answer:
+            full_prompt = f"""Identify the game being played and the specific level or guide shown in this video. Then, answer the following question:
+
+{prompt}
+
+Your response should:
+1. Start with a clear identification of the game and level/area.
+2. Provide a detailed answer to the question, referencing specific visual elements and events in the video.
+3. Use precise gaming terminology relevant to the identified game.
+4. Include timestamps for key moments or actions mentioned in your response.
+5. Be informative for both newcomers and experienced players of the game.
+
+Limit your response to 250-300 words."""
+        else:
+            full_prompt = f"""Analyze the video content and answer the following question:
+
+{prompt}
+
+Your response should:
+1. Directly address the question using information from the video.
+2. Use specific examples and timestamps from the video to support your answer.
+3. Employ relevant gaming terminology and explain any game-specific concepts.
+4. Provide context for your observations, relating them to broader game mechanics or strategies.
+5. Be clear and informative for users of various skill levels.
+
+Limit your response to 200-250 words."""
+
+        res = client.generate.text(
+            video_id=video_id,
+            prompt=full_prompt,
+            temperature=0.2,  # Slightly increased for a balance between accuracy and detail
+            stream=False
+        )
+        return res.data
+    except Exception as e:
+        st.error(f"Error generating open-ended text: {str(e)}")
+        return ""
+
+
+def extract_frames(video_path, timestamps):
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    for timestamp in timestamps:
+        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+        ret, frame = cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame)
+            frames.append(img)
+    cap.release()
+    return frames
+
+def encode_image(image):
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
+    try:
+        cap = cv2.VideoCapture(video_file_path)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        out = cv2.VideoWriter(output_file_path, fourcc, fps, (width, height))
+        
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
+        while cap.get(cv2.CAP_PROP_POS_MSEC) <= end_time * 1000:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out.write(frame)
+        
+        cap.release()
+        out.release()
+    except Exception as e:
+        st.error(f"Error extracting video clip: {str(e)}")
+
+def analyze_frames_with_gpt4(frames):
+    analyses = []
+    for i, frame in enumerate(frames):
+        base64_image = encode_image(frame)
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert in analyzing video game screenshots. Provide concise, relevant observations that could add context to understanding the game's progression or key moments. Focus only on significant elements that might be crucial for understanding the gameplay or story."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": """Briefly describe the most important elements in this game screenshot. Focus on:
+1. Key gameplay moments or story progression indicators
+2. Significant UI elements that show important game state
+3. Notable character actions or environmental changes
+Limit your response to 2-3 sentences, mentioning only the most relevant details."""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "high"
+                            }
+                        }
+                    ],
+                }
+            ],
+            max_tokens=100,
+        )
+        analyses.append(f"Frame {i+1}: {response.choices[0].message.content}")
+    return "\n\n".join(analyses)
+
+def chatgpt_rag_analysis(question, twelve_labs_result, game_info, chat_history, gist):
+    try:
+        # Perform RAG search with game_info included
+        rag_answer, rag_results = perform_rag_search(question, game_info)
+        
+        enhancement_prompt = f"""
+You are an expert in video game terminology. Your task is to minimally enhance the given video analysis by adding only the game title (if missing) and essential gaming terminology FROM THE PROVIDED RAG SEARCH RESULTS.
+
+Video Analysis:
+{twelve_labs_result}
+
+RAG Search Results (source of game terminology):
+{rag_results}
+
+Your task:
+1. If the game title is not mentioned in the video analysis, add it at the beginning using information from the RAG search results.
+2. Identify any generic terms in the video analysis that could be replaced with specific gaming terminology found in the RAG search results.
+3. Only add or replace terms if they are present in the RAG search results AND essential for understanding the content.
+4. Do not change the structure or main content of the original analysis.
+5. If you make any changes, enclose the added or modified terms in [square brackets].
+6. If no relevant terminology is found in the RAG search results, or if no changes are needed, return the original analysis as is.
+
+Provide the minimally enhanced analysis below, using ONLY terminology from the RAG search results:
+"""
+
+        # Generate the enhanced response using OpenAI
+        response = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert in video game terminology who makes minimal, necessary enhancements to video analyses using only information from provided RAG search results."
+                },
+                {"role": "user", "content": enhancement_prompt}
+            ],
+            max_tokens=1200,
+            temperature=0.1,  # Lower temperature for more conservative output
+            n=1
+        )
+        
+        enhanced_response = response.choices[0].message.content.strip()
+        return enhanced_response
     except Exception as e:
         st.error(f"Error in ChatGPT RAG analysis: {str(e)}")
         return twelve_labs_result  # Return the original result if there's an error
@@ -343,22 +551,21 @@ def generate_openai_text(prompt):
         st.error(f"Error generating text with OpenAI: {str(e)}")
         return ""
 
-
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 def summarize_guide_with_links(chat_history):
     prompt = """
-    Based on the following chat history, create a concise guide summary including:
-    1. Main objective
-    2. Key points or steps
-    3. Any important tips or warnings
-    4. Incorporate relevant links from the internet searches
+Based on the following chat history, create a concise guide summary including:
+1. Main objective
+2. Key points or steps
+3. Any important tips or warnings
+4. Incorporate relevant links from the internet searches
 
-    Include the most relevant links directly in the summary text.
+Include the most relevant links directly in the summary text.
 
-    Chat History:
-    """
+Chat History:
+"""
     for message in chat_history:
         prompt += f"\n{message['role'].capitalize()}: {message['content']}"
 
@@ -371,7 +578,6 @@ def summarize_guide_with_links(chat_history):
         max_tokens=300
     )
     return response.choices[0].message.content.strip()
-
 
 def search_video(client, index_id, prompt, video_embeddings):
     try:
@@ -408,21 +614,28 @@ def search_video(client, index_id, prompt, video_embeddings):
         # Filter out overlapping clips
         filtered_results = []
         video_duration = max(result['end'] for result in results)
-        min_clip_duration = 10  # Minimum duration of a clip in seconds
-        max_clips = max(5, int(video_duration / 30))  # At least 5 clips, or more for longer videos
+        min_clip_duration = max(30, video_duration * 0.05)  # Minimum of 30 seconds or 5% of video length
+        max_clips = max(5, min(10, int(video_duration / 60)))  # At least 5 clips, at most 10, or 1 per minute
 
         for result in results:
             overlap = False
             for filtered_result in filtered_results:
-                if (result['start'] < filtered_result['end'] and result['end'] > filtered_result['start']) or \
-                   (abs(result['start'] - filtered_result['start']) < min_clip_duration):
+                if (result['start'] < filtered_result['end'] and result['end'] > filtered_result['start']):
+                    # If there's overlap, extend the existing clip if the new one has a higher score
+                    if result['score'] > filtered_result['score']:
+                        filtered_result['start'] = min(filtered_result['start'], result['start'])
+                        filtered_result['end'] = max(filtered_result['end'], result['end'])
+                        filtered_result['score'] = max(filtered_result['score'], result['score'])
                     overlap = True
                     break
             if not overlap and len(filtered_results) < max_clips:
+                # Ensure minimum clip duration
+                if result['end'] - result['start'] < min_clip_duration:
+                    result['end'] = min(result['start'] + min_clip_duration, video_duration)
                 filtered_results.append(result)
 
-            # Break if we have covered the entire video duration
-            if len(filtered_results) >= max_clips and filtered_results[-1]['end'] >= video_duration * 0.9:
+            # Break if we have covered a significant portion of the video
+            if len(filtered_results) >= max_clips and filtered_results[-1]['end'] >= video_duration * 0.8:
                 break
 
         # Sort the filtered results chronologically
@@ -435,8 +648,6 @@ def search_video(client, index_id, prompt, video_embeddings):
         import traceback
         st.error(f"Traceback: {traceback.format_exc()}")
         return []
-
-
 
 def generate_open_ended_text(video_id, prompt, is_first_answer=False):
     try:
@@ -458,26 +669,25 @@ def generate_open_ended_text(video_id, prompt, is_first_answer=False):
 
 def summarize_chat_history(chat_history):
     prompt = """
-    Summarize the following chat history into a concise search prompt for a video game scenario page. 
-    The summary should:
-    - Capture key steps and important elements mentioned in the conversation
-    - Be relevant to the video content and user's intentions
-    - Be structured for effective video clip search
-    - Not exceed 76 tokens
-    - Frame the content for a wiki-style or scenario-based gaming page
-    - Highlight crucial user inputs for accurate video clip retrieval
-    - Emphasize the importance of maintaining chronological order in the video clips
-    - Include language that encourages sequential progression through the game or scenario
+Summarize the following chat history into a concise search prompt for a video game scenario page.
+The summary should:
+- Capture key steps and important elements mentioned in the conversation
+- Be relevant to the video content and user's intentions
+- Be structured for effective video clip search
+- Not exceed 76 tokens
+- Frame the content for a wiki-style or scenario-based gaming page
+- Highlight crucial user inputs for accurate video clip retrieval
+- Emphasize the importance of maintaining chronological order in the video clips
+- Include language that encourages sequential progression through the game or scenario
 
-    Ensure the summary search prompt promotes a chronological flow of events based on the chat history info and the video content, using phrases like:
-    - "From the beginning of the game..."
-    - "As the gameplay progresses..."
-    - "Moving on to the next stage..."
-    - "In the final part of the scenario..."
+Ensure the summary search prompt promotes a chronological flow of events based on the chat history info and the video content, using phrases like:
+- "From the beginning of the game..."
+- "As the gameplay progresses..."
+- "Moving on to the next stage..."
+- "In the final part of the scenario..."
 
-    Chat History:
-    """
-    
+Chat History:
+"""
     for message in chat_history:
         prompt += f"\n{message['role'].capitalize()}: {message['content']}"
 
@@ -501,9 +711,6 @@ def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
     except Exception as e:
         st.error(f"Error extracting video clip: {str(e)}")
 
-
-
-
 def calculate_similarity(str1, str2):
     return difflib.SequenceMatcher(None, str1, str2).ratio()
 
@@ -513,78 +720,169 @@ def generate_scenario_page(prompt, search_results, descriptions):
     st.subheader("Guide Summary")
     st.markdown(guide_summary, unsafe_allow_html=True)
 
-    displayed_descriptions = []
-    similarity_threshold = 0.8  # Adjust this value to change sensitivity
+    # Initialize the list of displayed clips in session state if not already present
+    if 'displayed_clips' not in st.session_state:
+        st.session_state['displayed_clips'] = list(enumerate(zip(search_results, descriptions), 1))
 
-    for i, (clip, description) in enumerate(zip(search_results, descriptions), 1):
-        is_unique = True
-        for displayed_description in displayed_descriptions:
-            if calculate_similarity(description, displayed_description) > similarity_threshold:
-                is_unique = False
-                break
+    clip_number = 1  # Initialize clip number
+
+    # Create a copy of the displayed clips to iterate over
+    displayed_clips_copy = st.session_state['displayed_clips'].copy()
+
+    for i, (clip, description) in displayed_clips_copy:
+        st.subheader(f"Clip {clip_number}")
+        clip_number += 1  # Increment clip number
         
-        if is_unique:
-            displayed_descriptions.append(description)
+        # Use Streamlit's video playback
+        start_time = clip['start']
+        end_time = clip['end']
+        video_file = open(st.session_state['video_file_path'], 'rb')
+        video_bytes = video_file.read()
+        st.video(video_bytes, start_time=int(start_time))
+        st.markdown(
+            f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>",
+            unsafe_allow_html=True
+        )
 
-            st.subheader(f"Clip {i}")
-            # Use Streamlit's video playback
-            start_time = clip['start']
-            video_file = open(st.session_state['video_file_path'], 'rb')
-            video_bytes = video_file.read()
-            st.video(video_bytes, start_time=int(start_time))
-            st.markdown(f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>", unsafe_allow_html=True)
-            st.markdown("<div class='description'>", unsafe_allow_html=True)
-            st.markdown("<strong>AI Description:</strong>", unsafe_allow_html=True)
-            
-            # Add edit functionality for description
-            description_key = f"description_{i}"
-            if description_key not in st.session_state:
-                st.session_state[description_key] = description
-            
-            edited_description = st.text_area("Edit Description", st.session_state[description_key], key=f"edit_{i}")
-            if st.button("Save AI Description Changes", key=f"save_ai_{i}"):
-                st.session_state[description_key] = edited_description
-                st.success("AI Description changes saved successfully!")
-            
-            st.markdown(st.session_state[description_key], unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+        # Adjust Relevant Start and Stop Times
+        st.markdown("<strong>Adjust Relevant Time Range:</strong>", unsafe_allow_html=True)
+        relevant_start_key = f"relevant_start_{i}"
+        relevant_end_key = f"relevant_end_{i}"
 
-            # Add user content section with save functionality
-            st.subheader("Add Your Content")
-            
-            # User text
-            user_text_key = f"user_text_{i}"
-            if user_text_key not in st.session_state:
-                st.session_state[user_text_key] = ""
-            user_text = st.text_area("Add your text", value=st.session_state[user_text_key], key=f"input_{user_text_key}")
-            
-            # User link
-            user_link_key = f"user_link_{i}"
-            if user_link_key not in st.session_state:
-                st.session_state[user_link_key] = ""
-            user_link = st.text_input("Paste a link", value=st.session_state[user_link_key], key=f"input_{user_link_key}")
-            
-            # User image
-            user_image_key = f"user_image_{i}"
-            user_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"], key=f"upload_{user_image_key}")
-            
-            # Save user content button
-            if st.button("Save User Content", key=f"save_user_{i}"):
-                st.session_state[user_text_key] = user_text
-                st.session_state[user_link_key] = user_link
-                if user_image is not None:
-                    st.session_state[user_image_key] = user_image
-                st.success("User content saved successfully!")
+        # Set session state values within the clip's time range if not already set
+        if relevant_start_key not in st.session_state:
+            st.session_state[relevant_start_key] = start_time
+        if relevant_end_key not in st.session_state:
+            st.session_state[relevant_end_key] = end_time
 
-            # Display saved user content
-            if st.session_state[user_text_key]:
-                st.markdown(f"<div class='user-content'><p>{st.session_state[user_text_key]}</p></div>", unsafe_allow_html=True)
-            if st.session_state[user_link_key]:
-                st.markdown(f"<div class='user-content'><a href='{st.session_state[user_link_key]}' target='_blank'>{st.session_state[user_link_key]}</a></div>", unsafe_allow_html=True)
-            if user_image_key in st.session_state and st.session_state[user_image_key] is not None:
-                st.image(st.session_state[user_image_key], caption="User uploaded image")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_start = st.number_input(
+                "Relevant Start Time (seconds)",
+                min_value=float(start_time),
+                max_value=float(end_time),
+                value=max(float(start_time), min(float(end_time), float(st.session_state[relevant_start_key]))),
+                key=f"relevant_start_input_{i}"
+            )
+        with col2:
+            new_end = st.number_input(
+                "Relevant End Time (seconds)",
+                min_value=float(start_time),
+                max_value=float(end_time),
+                value=min(float(end_time), max(float(start_time), float(st.session_state[relevant_end_key]))),
+                key=f"relevant_end_input_{i}"
+            )
+        if st.button("Save Relevant Time Range", key=f"save_time_{i}"):
+            if new_start >= start_time and new_end <= end_time and new_start < new_end:
+                st.session_state[relevant_start_key] = new_start
+                st.session_state[relevant_end_key] = new_end
+                st.success("Relevant time range updated successfully!")
+            else:
+                st.error(
+                    "Invalid time range. Please ensure the start time is before the end time and within the clip duration."
+                )
 
-            st.markdown("<hr>", unsafe_allow_html=True)
+        # Display the adjusted relevant time range
+        st.markdown(
+            f"**Relevant Time Range:** {st.session_state[relevant_start_key]}s to {st.session_state[relevant_end_key]}s"
+        )
+
+        st.markdown("<div class='description'>", unsafe_allow_html=True)
+        st.markdown("<strong>AI Description:</strong>", unsafe_allow_html=True)
+        # Add edit functionality for description
+        description_key = f"description_{i}"
+        if description_key not in st.session_state:
+            st.session_state[description_key] = description
+        edited_description = st.text_area(
+            "Edit Description", st.session_state[description_key], key=f"edit_{i}"
+        )
+        if st.button("Save AI Description Changes", key=f"save_ai_{i}"):
+            st.session_state[description_key] = edited_description
+            st.success("AI Description changes saved successfully!")
+        st.markdown(st.session_state[description_key], unsafe_allow_html=True)
+
+        # Prompt Input for Generating New AI Description
+        st.markdown("<strong>Generate New AI Description:</strong>", unsafe_allow_html=True)
+        ai_prompt = st.text_area(
+            "Enter a prompt to generate a new AI description for this clip:",
+            key=f"ai_prompt_{i}"
+        )
+        if st.button("Generate New AI Description", key=f"generate_ai_{i}"):
+            with st.spinner("Generating new AI description..."):
+                # Use the adjusted relevant times
+                relevant_start = st.session_state[relevant_start_key]
+                relevant_end = st.session_state[relevant_end_key]
+                clip_context = f"Analyze the video clip from {relevant_start} to {relevant_end} seconds."
+                full_prompt = f"{clip_context}\n\n{ai_prompt}"
+                # Generate initial response using the open-ended function
+                initial_response = generate_open_ended_text(
+                    video_id=st.session_state['video_id'],
+                    prompt=full_prompt,
+                    is_first_answer=False
+                )
+                # Enhance the response using chatgpt_rag_analysis
+                enhanced_response = chatgpt_rag_analysis(ai_prompt, initial_response, "")
+                # Update the AI description
+                st.session_state[description_key] = enhanced_response
+                st.success("New AI Description generated successfully!")
+                # Display the new description
+                st.markdown(enhanced_response, unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Add user content section with save functionality
+        st.subheader("Add Your Content")
+        # User text
+        user_text_key = f"user_text_{i}"
+        if user_text_key not in st.session_state:
+            st.session_state[user_text_key] = ""
+        user_text = st.text_area(
+            "Add your text", value=st.session_state[user_text_key], key=f"input_{user_text_key}"
+        )
+        # User link
+        user_link_key = f"user_link_{i}"
+        if user_link_key not in st.session_state:
+            st.session_state[user_link_key] = ""
+        user_link = st.text_input(
+            "Paste a link", value=st.session_state[user_link_key], key=f"input_{user_link_key}"
+        )
+        # User image
+        user_image_key = f"user_image_{i}"
+        user_image = st.file_uploader(
+            "Upload an image", type=["png", "jpg", "jpeg"], key=f"upload_{user_image_key}"
+        )
+        # Save user content button
+        if st.button("Save User Content", key=f"save_user_{i}"):
+            st.session_state[user_text_key] = user_text
+            st.session_state[user_link_key] = user_link
+            if user_image is not None:
+                # Read the file and save it as bytes in the session state
+                st.session_state[user_image_key] = user_image.read()
+            st.success("User content saved successfully!")
+
+        # Display saved user content
+        if st.session_state[user_text_key]:
+            st.markdown(
+                f"<div class='user-content'><p>{st.session_state[user_text_key]}</p></div>",
+                unsafe_allow_html=True
+            )
+        if st.session_state[user_link_key]:
+            st.markdown(
+                f"<div class='user-content'><a href='{st.session_state[user_link_key]}' target='_blank'>{st.session_state[user_link_key]}</a></div>",
+                unsafe_allow_html=True
+            )
+        if user_image_key in st.session_state and st.session_state[user_image_key] is not None:
+            # Display the image using st.image
+            st.image(st.session_state[user_image_key], caption="User uploaded image")
+
+        # Add delete button
+        if st.button(f"Delete Clip {i}", key=f"delete_clip_{i}"):
+            st.session_state['displayed_clips'] = [
+                (idx, c) for idx, c in st.session_state['displayed_clips'] if idx != i
+            ]
+            st.experimental_rerun()
+
+        st.markdown("<hr>", unsafe_allow_html=True)
 
     # Add Q&A section for the entire video
     st.subheader("Ask a question about this video")
@@ -592,22 +890,21 @@ def generate_scenario_page(prompt, search_results, descriptions):
         user_question = st.text_input("Your question about the video")
         submit_button = st.form_submit_button(label='Get Answer')
 
-    if submit_button and user_question:
-        with st.spinner("Generating answer..."):
-            if 'video_embeddings' in st.session_state:
-                video_search_results = search_video(
-                    client,
-                    st.session_state['video_index_id'],
-                    user_question,
-                    st.session_state['video_embeddings']
-                )
-                if video_search_results:
-                    video_search_results.sort(key=lambda x: x['start'])
-                    context = ""
-                    for result in video_search_results[:5]:
-                        context += f"From {result['start']} to {result['end']} seconds (score: {result['score']:.2f})\n"
-                    
-                    prompt = f"""Based on the following video segments:
+        if submit_button and user_question:
+            with st.spinner("Generating answer..."):
+                if 'video_embeddings' in st.session_state:
+                    video_search_results = search_video(
+                        client,
+                        st.session_state['video_index_id'],
+                        user_question,
+                        st.session_state['video_embeddings']
+                    )
+                    if video_search_results:
+                        video_search_results.sort(key=lambda x: x['start'])
+                        context = ""
+                        for result in video_search_results[:5]:
+                            context += f"From {result['start']} to {result['end']} seconds (score: {result['score']:.2f})\n"
+                        prompt = f"""Based on the following video segments:
 
 {context}
 
@@ -616,20 +913,19 @@ Respond to this user message in detail (about 200-250 words):
 
 Include specific references to the video content where relevant, and provide a comprehensive answer that covers the main points while still being concise."""
 
-                    twelve_labs_response = generate_open_ended_text(
-                        video_id=st.session_state['video_id'],
-                        prompt=prompt,
-                        is_first_answer=False
-                    )
-                    
-                    answer = chatgpt_rag_analysis(user_question, twelve_labs_response, "")
+                        twelve_labs_response = generate_open_ended_text(
+                            video_id=st.session_state['video_id'],
+                            prompt=prompt,
+                            is_first_answer=False
+                        )
+                        answer = chatgpt_rag_analysis(user_question, twelve_labs_response, "")
+                    else:
+                        answer = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
                 else:
-                    answer = "I apologize, but I couldn't find any relevant content in the video to answer your question. Could you please rephrase your query or ask about a different aspect of the video?"
-            else:
-                answer = "I'm sorry, but I couldn't find the video embeddings. Please make sure the video has been properly processed."
+                    answer = "I'm sorry, but I couldn't find the video embeddings. Please make sure the video has been properly processed."
 
-            st.markdown(f"<strong>Question:</strong> {user_question}", unsafe_allow_html=True)
-            st.markdown(f"<strong>Answer:</strong> {answer}", unsafe_allow_html=True)
+                st.markdown(f"<strong>Question:</strong> {user_question}", unsafe_allow_html=True)
+                st.markdown(f"<strong>Answer:</strong> {answer}", unsafe_allow_html=True)
 
     # Add publish button
     if st.button("Publish Page"):
@@ -637,7 +933,10 @@ Include specific references to the video content where relevant, and provide a c
         page_content = {
             "prompt": prompt,
             "guide_summary": guide_summary,
-            "clips": [{"clip": clip, "description": st.session_state[f"description_{i}"]} for i, clip in enumerate(search_results, 1)]
+            "clips": [
+                {"clip": clip, "description": st.session_state[f"description_{i}"]}
+                for i, (clip, _) in st.session_state['displayed_clips']
+            ]
         }
         save_page(page_id, page_content)
         st.success(f"Page published! Share this link: https://your-app-url.com/?page_id={page_id}")
@@ -645,45 +944,45 @@ Include specific references to the video content where relevant, and provide a c
     # Add floating search bar
     st.markdown("""
     <div class="floating-search">
-        <input type="text" id="floating-search-input" placeholder="Ask about the video...">
-        <button onclick="searchVideo()">Ask</button>
+    <input type="text" id="floating-search-input" placeholder="Ask about the video...">
+    <button onclick="searchVideo()">Ask</button>
     </div>
     """, unsafe_allow_html=True)
 
     # Add custom CSS to maintain styling and add floating search bar
     st.markdown("""
     <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
-        .guide-summary { background-color: #f0f0f1; padding: 15px; margin-bottom: 20px; border-left: 5px solid #333; }
-        .clip { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }
-        .clip h3 { color: #333; }
-        .relevance-score { font-style: italic; color: #666; }
-        .description { margin-top: 10px; }
-        .comments { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }
-        video { width: 100%; max-width: 600px; }
-        .floating-search {
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background-color: white;
-            padding: 10px;
-            border-radius: 5px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            z-index: 1000;
-        }
-        #floating-search-input {
-            width: 300px;
-            padding: 5px;
-            margin-right: 10px;
-        }
+    body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
+    .guide-summary { background-color: #f0f0f1; padding: 15px; margin-bottom: 20px; border-left: 5px solid #333; }
+    .clip { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }
+    .clip h3 { color: #333; }
+    .relevance-score { font-style: italic; color: #666; }
+    .description { margin-top: 10px; }
+    .comments { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }
+    video { width: 100%; max-width: 600px; }
+    .floating-search {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: white;
+    padding: 10px;
+    border-radius: 5px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    z-index: 1000;
+    }
+    #floating-search-input {
+    width: 300px;
+    padding: 5px;
+    margin-right: 10px;
+    }
     </style>
     <script>
     function searchVideo() {
-        var question = document.getElementById('floating-search-input').value;
-        // You'll need to implement a way to trigger the Streamlit app to process this question
-        // This might involve using Streamlit's component communication or other methods
-        alert('Asking: ' + question);
+    var question = document.getElementById('floating-search-input').value;
+    // You'll need to implement a way to trigger the Streamlit app to process this question
+    // This might involve using Streamlit's component communication or other methods
+    alert('Asking: ' + question);
     }
     </script>
     """, unsafe_allow_html=True)
@@ -797,8 +1096,8 @@ def main():
                 if 'video_embeddings' in st.session_state:
                     search_results = search_video(
                         client,
-                        st.session_state['video_index_id'], 
-                        search_prompt, 
+                        st.session_state['video_index_id'],
+                        search_prompt,
                         st.session_state['video_embeddings']
                     )
                 else:
@@ -814,19 +1113,19 @@ def main():
                 for clip in search_results:
                     prompt = f"""Analyze the video clip from {clip['start']} to {clip['end']} seconds and create a structured summary:
 
-    1. Start with a bold title explaining the main focus.
-    2. Provide a concise description of key events (2-3 sentences).
-    3. Use 2-3 labeled sub-topics (e.g., "Strategy:", "Key Items:") for organization.
-    4. Highlight crucial controls in [brackets] if applicable.
-    5. Mention any unique player insights or tips.
-    6. Note 1-2 notable game mechanics or abilities if relevant.
-    7. End with a brief "Key Takeaway:".
-    8. Make sure to label the timestamp start and end time in second and minutes for each relevant clip in the description so the user knows what duration of the whole clip is relevant.
+1. Start with a bold title explaining the main focus.
+2. Provide a concise description of key events (2-3 sentences).
+3. Use 2-3 labeled sub-topics (e.g., "Strategy:", "Key Items:") for organization.
+4. Highlight crucial controls in [brackets] if applicable.
+5. Mention any unique player insights or tips.
+6. Note 1-2 notable game mechanics or abilities if relevant.
+7. End with a brief "Key Takeaway:".
+8. Make sure to label the timestamp start and end time in second and minutes for each relevant clip in the description so the user knows what duration of the whole clip is relevant.
 
-    Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
+Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
 
-    Context: {search_prompt}
-    """
+Context: {search_prompt}
+"""
                     description = generate_open_ended_text(
                         st.session_state['video_id'],
                         prompt=prompt
