@@ -493,8 +493,18 @@ def chatgpt_rag_analysis(question, twelve_labs_result, game_info, chat_history, 
         # Perform RAG search with game_info included
         rag_answer, rag_results = perform_rag_search(question, game_info)
         
+        # Extract recent chat history
+        recent_chat = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history[-5:]])
+
         enhancement_prompt = f"""
-You are an expert in video game terminology. Your task is to minimally enhance the given video analysis by adding only the game title (if missing) and essential gaming terminology FROM THE PROVIDED RAG SEARCH RESULTS.
+You are an expert in video game terminology, particularly for the game and level described in the following information:
+
+Game Information: {game_info}
+
+Recent Chat Context:
+{recent_chat}
+
+Your task is to minimally enhance the given video analysis by adding only the game title (if missing) and essential gaming terminology FROM THE PROVIDED RAG SEARCH RESULTS.
 
 Video Analysis:
 {twelve_labs_result}
@@ -649,24 +659,6 @@ def search_video(client, index_id, prompt, video_embeddings):
         st.error(f"Traceback: {traceback.format_exc()}")
         return []
 
-def generate_open_ended_text(video_id, prompt, is_first_answer=False):
-    try:
-        if is_first_answer:
-            full_prompt = f"Identify the game being played and the specific level or guide shown in this video only in the first response to the user, then answer the following question: {prompt}"
-        else:
-            full_prompt = prompt
-
-        res = client.generate.text(
-            video_id=video_id,
-            prompt=full_prompt,
-            temperature=0.1,  # Set to a very low temperature for factual responses
-            stream=False
-        )
-        return res.data
-    except Exception as e:
-        st.error(f"Error generating open-ended text: {str(e)}")
-        return ""
-
 def summarize_chat_history(chat_history):
     prompt = """
 Summarize the following chat history into a concise search prompt for a video game scenario page.
@@ -720,6 +712,43 @@ def generate_scenario_page(prompt, search_results, descriptions):
     st.subheader("Guide Summary")
     st.markdown(guide_summary, unsafe_allow_html=True)
 
+    # Generate highlights for the entire video (keep this as it's used for search)
+    try:
+        highlights_response = client.generate.summarize(
+            video_id=st.session_state['video_id'],
+            type="highlight",
+            prompt="Identify the most significant moments or elements in this entire video, focusing on key gameplay events, objectives, and strategies."
+        )
+        # We're not displaying the highlights, but keeping them for search functionality
+    except Exception as e:
+        st.error(f"Error generating highlights: {str(e)}")
+        return
+
+    # Use highlights as search prompts and for clip selection
+    search_results = []
+    descriptions = []
+    for highlight in highlights_response.highlights:
+        # Use the highlight text as the search prompt
+        highlight_results = search_video(
+            client,
+            st.session_state['video_index_id'],
+            highlight.highlight,
+            st.session_state['video_embeddings']
+        )
+        
+        if highlight_results:
+            # Take the top result for each highlight
+            top_result = highlight_results[0]
+            search_results.append(top_result)
+            
+            # Generate description for the clip (keeping this for consistency)
+            description_prompt = f"""Analyze the video clip from {top_result['start']} to {top_result['end']} seconds and create a structured summary."""
+            description = generate_open_ended_text(
+                st.session_state['video_id'],
+                prompt=description_prompt
+            )
+            descriptions.append(description)
+
     # Initialize the list of displayed clips in session state if not already present
     if 'displayed_clips' not in st.session_state:
         st.session_state['displayed_clips'] = list(enumerate(zip(search_results, descriptions), 1))
@@ -743,6 +772,58 @@ def generate_scenario_page(prompt, search_results, descriptions):
             f"<p class='relevance-score'><strong>Relevance Score:</strong> {clip['score']:.2f}</p>",
             unsafe_allow_html=True
         )
+
+        # Generate summary for the clip using Twelve Labs API
+        try:
+            summary_response = client.generate.summarize(
+                video_id=st.session_state['video_id'],
+                type="summary",
+                prompt=f"Summarize the video segment from {start_time} to {end_time} seconds in a concise, informative manner."
+            )
+
+            # Display the generated summary
+            st.markdown("### Clip Summary")
+            st.markdown(f"**Timestamp: {start_time} - {end_time} seconds**")
+            st.markdown(summary_response.summary, unsafe_allow_html=True)
+
+            # Update the description_key with the new summary
+            description_key = f"description_{i}"
+            st.session_state[description_key] = summary_response.summary
+
+        except Exception as e:
+            st.error(f"Error generating clip summary: {str(e)}")
+            description_key = f"description_{i}"
+            st.session_state[description_key] = description  # Fallback to original description
+
+        # Rest of the code for comments, time range adjustment, etc. remains the same
+        
+
+    # Rest of the function remains unchanged
+    
+
+        # Add comment section here, before the "Adjust Relevant Time Range" feature
+        st.subheader("Comments")
+        comment_key = f"comments_{i}"
+        if comment_key not in st.session_state:
+            st.session_state[comment_key] = []
+
+        # Display existing comments
+        for comment in st.session_state[comment_key]:
+            st.markdown(f"**{comment['author']}**: {comment['text']}")
+            st.markdown(f"<small>{comment['timestamp']}</small>", unsafe_allow_html=True)
+
+        # Add new comment
+        new_comment = st.text_area("Add a comment", key=f"new_comment_{i}")
+        if st.button("Post Comment", key=f"post_comment_{i}"):
+            if new_comment:
+                comment = {
+                    "author": "User",  # You can implement user authentication to get the actual username
+                    "text": new_comment,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                st.session_state[comment_key].append(comment)
+                st.success("Comment posted successfully!")
+                st.experimental_rerun()
 
         # Adjust Relevant Start and Stop Times
         st.markdown("<strong>Adjust Relevant Time Range:</strong>", unsafe_allow_html=True)
@@ -813,7 +894,36 @@ def generate_scenario_page(prompt, search_results, descriptions):
                 relevant_start = st.session_state[relevant_start_key]
                 relevant_end = st.session_state[relevant_end_key]
                 clip_context = f"Analyze the video clip from {relevant_start} to {relevant_end} seconds."
-                full_prompt = f"{clip_context}\n\n{ai_prompt}"
+                
+                # Prepare chat history context
+                chat_context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state['chat_history']])
+                
+                full_prompt = f"""
+You have access to the entire video context and chat history. Focus your description on the specific clip from {relevant_start} to {relevant_end} seconds, but use the broader context to inform your analysis.
+
+Video Context: {st.session_state.get('gist', 'No gist available')}
+
+Chat History:
+{chat_context}
+
+{clip_context}
+
+Provide a detailed description of the gameplay in this clip, focusing on:
+1. Specific game mechanics and systems visible in the footage
+2. Key actions or decisions made by the player
+3. Any notable events or changes in the game state
+4. Relevant strategic insights or tips for players
+
+Your response should:
+1. Start with a bold title summarizing the main focus or key event in this clip.
+2. Use precise, game-specific terminology where appropriate.
+3. Include timestamps for key moments or actions mentioned in your response.
+4. Be informative for both newcomers and experienced players of the game.
+
+Limit your response to 250-300 words.
+
+User Prompt: {ai_prompt}
+"""
                 # Generate initial response using the open-ended function
                 initial_response = generate_open_ended_text(
                     video_id=st.session_state['video_id'],
@@ -942,6 +1052,7 @@ Include specific references to the video content where relevant, and provide a c
         st.success(f"Page published! Share this link: https://your-app-url.com/?page_id={page_id}")
 
     # Add floating search bar
+    # Add floating search bar
     st.markdown("""
     <div class="floating-search">
     <input type="text" id="floating-search-input" placeholder="Ask about the video...">
@@ -949,43 +1060,7 @@ Include specific references to the video content where relevant, and provide a c
     </div>
     """, unsafe_allow_html=True)
 
-    # Add custom CSS to maintain styling and add floating search bar
-    st.markdown("""
-    <style>
-    body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
-    .guide-summary { background-color: #f0f0f1; padding: 15px; margin-bottom: 20px; border-left: 5px solid #333; }
-    .clip { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; }
-    .clip h3 { color: #333; }
-    .relevance-score { font-style: italic; color: #666; }
-    .description { margin-top: 10px; }
-    .comments { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }
-    video { width: 100%; max-width: 600px; }
-    .floating-search {
-    position: fixed;
-    bottom: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    background-color: white;
-    padding: 10px;
-    border-radius: 5px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    z-index: 1000;
-    }
-    #floating-search-input {
-    width: 300px;
-    padding: 5px;
-    margin-right: 10px;
-    }
-    </style>
-    <script>
-    function searchVideo() {
-    var question = document.getElementById('floating-search-input').value;
-    // You'll need to implement a way to trigger the Streamlit app to process this question
-    // This might involve using Streamlit's component communication or other methods
-    alert('Asking: ' + question);
-    }
-    </script>
-    """, unsafe_allow_html=True)
+  # This closes the generate_scenario_page function
 
 def save_page(page_id, content):
     conn = sqlite3.connect('wiki_pages.db')
@@ -1086,56 +1161,73 @@ def main():
 
     if st.button("Generate Page") or st.session_state['generate_page']:
         st.session_state['generate_page'] = True
-        if len(st.session_state['chat_history']) > 0:
+        if st.session_state['video_id'] is not None and 'video_embeddings' in st.session_state:
             with st.spinner("Processing..."):
-                # Summarize the chat history for search
-                search_prompt = summarize_chat_history(st.session_state['chat_history'])
-                st.write("Search Prompt:", search_prompt)  # Display the search prompt (you can remove this line later)
+                # Generate highlights for the entire video
+                try:
+                    highlights_response = client.generate.summarize(
+                        video_id=st.session_state['video_id'],
+                        type="highlight",
+                        prompt="Identify the most significant moments or elements in this entire video, focusing on key gameplay events, objectives, and strategies."
+                    )
+                    st.write("Video Highlights:")
+                    for highlight in highlights_response.highlights:
+                        st.write(f"* {highlight.highlight} ({highlight.start} - {highlight.end} seconds)")
+                except Exception as e:
+                    st.error(f"Error generating highlights: {str(e)}")
+                    return
 
-                # Search for relevant clips using the summarized search prompt and embeddings
-                if 'video_embeddings' in st.session_state:
-                    search_results = search_video(
+                # Use highlights as search prompts
+                search_results = []
+                descriptions = []
+                for highlight in highlights_response.highlights:
+                    highlight_results = search_video(
                         client,
                         st.session_state['video_index_id'],
-                        search_prompt,
+                        highlight.highlight,
                         st.session_state['video_embeddings']
                     )
-                else:
-                    st.error("Video embeddings not found. Please ensure the video is properly processed.")
-                    return
+                    
+                    if highlight_results:
+                        # Take the top result for each highlight
+                        top_result = highlight_results[0]
+                        search_results.append(top_result)
+                        
+                        start_time = top_result['start']
+                        end_time = top_result['end']
+                        # Generate description for the clip
+                        description_prompt = f"""Analyze the video clip from {start_time} to {end_time} seconds and create a concise guide-style summary:
 
-                if not search_results:
-                    st.warning("No relevant clips found.")
-                    return
+1. Start with a bold title describing the main focus of this specific clip segment.
+2. Describe the key actions, events, or information presented in this clip segment only.
+3. Use bullet points for any specific instructions or important details.
+4. Mention any relevant game mechanics or items that appear in this clip.
+5. If applicable, note any challenges or strategies specific to this part of the game.
+6. Avoid phrases like "players are informed" or "the guide emphasizes". Instead, state information directly.
+7. Do not recap the overall game or task goal in every summary; focus only on what's happening in this clip.
 
-                # Generate detailed descriptions for each clip
-                descriptions = []
-                for clip in search_results:
-                    prompt = f"""Analyze the video clip from {clip['start']} to {clip['end']} seconds and create a structured summary:
+Your summary should:
+- Be clear and concise, written as if it's a section of a game guide.
+- Use precise terminology relevant to the game.
+- Include the exact timestamp range for this clip.
+- Be informative for both newcomers and experienced players.
 
-1. Start with a bold title explaining the main focus.
-2. Provide a concise description of key events (2-3 sentences).
-3. Use 2-3 labeled sub-topics (e.g., "Strategy:", "Key Items:") for organization.
-4. Highlight crucial controls in [brackets] if applicable.
-5. Mention any unique player insights or tips.
-6. Note 1-2 notable game mechanics or abilities if relevant.
-7. End with a brief "Key Takeaway:".
-8. Make sure to label the timestamp start and end time in second and minutes for each relevant clip in the description so the user knows what duration of the whole clip is relevant.
+Limit your response to 150-200 words.
 
-Be clear for newcomers and informative for experienced players. Limit response to 1400 characters.
-
-Context: {search_prompt}
+Context: This clip is part of a larger gameplay video.
 """
-                    description = generate_open_ended_text(
-                        st.session_state['video_id'],
-                        prompt=prompt
-                    )
-                    descriptions.append(description)
+                        description = generate_open_ended_text(
+                            st.session_state['video_id'],
+                            prompt=description_prompt
+                        )
+                        descriptions.append(description)
 
                 # Generate and display the scenario page using Streamlit components
-                generate_scenario_page(search_prompt, search_results, descriptions)
+                generate_scenario_page("", search_results, descriptions)
 
                 st.success("Wiki page generated successfully!")
+        else:
+            st.error("Please ensure the video is uploaded and processed.")
 
 if __name__ == "__main__":
     main()
