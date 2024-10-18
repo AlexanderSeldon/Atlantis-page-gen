@@ -983,7 +983,7 @@ User Prompt: {ai_prompt}
             )
         if user_image_key in st.session_state and st.session_state[user_image_key] is not None:
             # Display the image using st.image
-            st.image(st.session_state[user_image_key], caption="User uploaded image")
+            st.image(user_image, caption="User uploaded image")
 
         # Add delete button
         if st.button(f"Delete Clip {i}", key=f"delete_clip_{i}"):
