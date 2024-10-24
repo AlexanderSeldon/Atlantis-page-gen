@@ -608,7 +608,7 @@ def search_video(client, index_id, prompt, video_embeddings):
         # Perform semantic search
         results = []
         for video_embedding in video_embeddings:
-            clip_vector = np.array(video_embedding.embedding.float)
+            clip_vector = np.array(video_embedding.values)
             # Calculate cosine similarity
             similarity = np.dot(query_vector, clip_vector) / (np.linalg.norm(query_vector) * np.linalg.norm(clip_vector))
             results.append({
@@ -705,6 +705,7 @@ def extract_video_clip(video_file_path, start_time, end_time, output_file_path):
 
 def calculate_similarity(str1, str2):
     return difflib.SequenceMatcher(None, str1, str2).ratio()
+
 
 def generate_scenario_page(prompt, search_results, descriptions):
     st.header("Wiki Page")
@@ -958,9 +959,12 @@ User Prompt: {ai_prompt}
         )
         # User image
         user_image_key = f"user_image_{i}"
+        
         user_image = st.file_uploader(
-            "Upload an image", type=["png", "jpg", "jpeg"], key=f"upload_{user_image_key}"
+            "Upload an image", type=["png", "jpg", "jpeg"], key=f"upload_{user_image_key}", accept_multiple_files=True,
         )
+        if user_image:
+            st.image(user_image, width=None)
         # Save user content button
         if st.button("Save User Content", key=f"save_user_{i}"):
             st.session_state[user_text_key] = user_text
