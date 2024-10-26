@@ -32,7 +32,8 @@ def initialize_session_state():
 
 def show_auth_page():
     """Display authentication page."""
-    st.title("Welcome to Gaming Wiki Generator")
+    st.title("Welcome to Atlantis Gaming Wiki Generator")
+
     
     # Create tabs for Login and Signup
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
