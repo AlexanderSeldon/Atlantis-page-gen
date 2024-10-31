@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atlantis - Next-Gen Gaming Wiki Platform</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Russo+One&display=swap" rel="stylesheet">
+    <style>
+        * {
+            font-family: 'Russo One', sans-serif;
+        }
+        .racing-style {
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            font-style: italic;
+        }
+        .chrome-text {
+            color: rgba(255, 255, 255, 0.95);
+            background: linear-gradient(
+                135deg,
+                rgba(255, 255, 255, 0.95) 0%,
+                rgba(255, 255, 255, 1) 50%,
+                rgba(255, 255, 255, 0.95) 100%
+            );
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            position: relative;
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+        }
+        .chrome-text::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            background: linear-gradient(
+                45deg,
+                transparent,
+                rgba(255, 255, 255, 0.2) 45%,
+                rgba(255, 255, 255, 0.7) 50%,
+                rgba(255, 255, 255, 0.2) 55%,
+                transparent
+            );
+            -webkit-background-clip: text;
+            background-clip: text;
+            animation: chrome-shine 5s infinite;
+        }
+        .chrome-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 
+                0 0 30px rgba(255, 255, 255, 0.03),
+                inset 0 0 30px rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(20px);
+            position: relative;
+            overflow: hidden;
+        }
+        .prismatic-edge {
+            position: relative;
+        }
+        .prismatic-edge::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            background: linear-gradient(
+                45deg,
+                transparent,
+                rgba(255,255,255,0.1) 45%,
+                rgba(255,255,255,0.3) 50%,
+                rgba(255,255,255,0.1) 55%,
+                transparent
+            );
+            pointer-events: none;
+            border-radius: inherit;
+            opacity: 0.5;
+        }
+        @keyframes chrome-shine {
+            0% { transform: translateX(-100%) rotate(45deg); }
+            100% { transform: translateX(100%) rotate(45deg); }
+        }
+        .nav-blur {
+            background: rgba(0, 0, 0, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 77, 0, 0.1);
+        }
+        body {
+            background: #000000;
+            min-height: 100vh;
+            color: #FFFFFF;
+        }
+        .btn-primary {
+            background: #FF4D00;
+            transition: all 0.3s ease;
+        }
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 0 20px rgba(255, 77, 0, 0.3);
+        }
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            transition: all 0.3s ease;
+        }
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .section-light {
+            background: #FF4D00;
+            position: relative;
+            overflow: hidden;
+        }
+        .section-light::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            background: linear-gradient(135deg, rgba(0,0,0,0.9), transparent);
+            pointer-events: none;
+        }
+        .section-light > * {
+            position: relative;
+            z-index: 1;
+        }
+        .section-dark {
+            background: #000000;
+        }
+        h1, h2, h3, .brand-text {
+            font-style: italic;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="fixed w-full z-50 nav-blur">
+        <div class="container mx-auto px-6 py-4">
+            <div class="flex items-center justify-between">
+                <div class="text-2xl font-bold chrome-text racing-style">Atlantis</div>
+                <div class="hidden md:flex space-x-8">
+                    <a href="#features" class="text-gray-300 hover:text-white transition racing-style">Features</a>
+                    <a href="#how-it-works" class="text-gray-300 hover:text-white transition racing-style">How It Works</a>
+                    <a href="#upcoming" class="text-gray-300 hover:text-white transition racing-style">Upcoming</a>
+                </div>
+                <button class="btn-primary px-6 py-2 rounded-full font-medium transition text-white racing-style">
+                    Get Started
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="min-h-screen flex items-center pt-20 section-dark">
+        <div class="container mx-auto px-6 py-24">
+            <div class="text-center">
+                <h1 class="text-5xl md:text-6xl font-bold mb-8">
+                    <span class="chrome-text racing-style">Transform Your Gaming Content</span><br/>
+                    <span class="chrome-text racing-style">With AI-Powered Guides</span>
+                </h1>
+                <p class="text-xl md:text-2xl mb-12 max-w-3xl mx-auto text-white">
+                    Upload your gameplay videos and let AI create detailed interactive wiki guides instantly.
+                    Share your expertise and earn money for your contributions.
+                </p>
+                <div class="flex flex-col sm:flex-row justify-center gap-4">
+                    <button class="btn-primary px-8 py-4 rounded-full text-lg font-medium transition text-white racing-style">
+                        Create Your First Guide
+                    </button>
+                    <a href="https://youtu.be/1dGmi1QcfAo?si=C3MWbSVPEZKi13Vh" target="_blank" 
+                       class="btn-secondary prismatic-edge px-8 py-4 rounded-full text-lg font-medium transition text-white inline-block racing-style">
+                        See How It Works
+                    </a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="py-20 section-light">
+        <div class="container mx-auto px-6">
+            <h2 class="text-4xl font-bold text-center mb-16 text-white racing-style">Key Features</h2>
+            <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
+                <div class="chrome-card p-6 rounded-xl prismatic-edge">
+                    <div class="text-4xl mb-4">📹</div>
+                    <h3 class="text-xl font-semibold mb-4 chrome-text racing-style">AI Video Analysis</h3>
+                    <p class="text-white">Your gameplay video automatically becomes a detailed written guide with relevant video clips</p>
+                </div>
+                <div class="chrome-card p-6 rounded-xl prismatic-edge">
+                    <div class="text-4xl mb-4">✍️</div>
+                    <h3 class="text-xl font-semibold mb-4 chrome-text racing-style">Smart Editor</h3>
+                    <p class="text-white">Easy editing with ai or manual edits</p>
+                </div>
+                <div class="chrome-card p-6 rounded-xl prismatic-edge">
+                    <div class="text-4xl mb-4">🤖</div>
+                    <h3 class="text-xl font-semibold mb-4 chrome-text racing-style">Interactive Chatbot</h3>
+                    <p class="text-white">Your viewers can also get instant answers from your guides through AI chat</p>
+                </div>
+                <div class="chrome-card p-6 rounded-xl prismatic-edge">
+                    <div class="text-4xl mb-4">💰</div>
+                    <h3 class="text-xl font-semibold mb-4 chrome-text racing-style">Fair Rewards</h3>
+                    <p class="text-white">Earn money from your gaming knowledge with our fair monetization system</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- How It Works -->
+    <section id="how-it-works" class="py-20 section-dark">
+        <div class="container mx-auto px-6">
+            <h2 class="text-4xl font-bold text-center mb-16 chrome-text racing-style">Create Guides in Minutes</h2>
+            <div class="max-w-4xl mx-auto">
+                <div class="grid md:grid-cols-2 gap-12">
+                    <div class="chrome-card prismatic-edge rounded-xl p-6 aspect-video">
+                        <iframe 
+                            class="w-full h-full rounded-lg"
+                            src="https://www.youtube.com/embed/1dGmi1QcfAo"
+                            title="Atlantis Demo"
+                            frameborder="0"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowfullscreen>
+                        </iframe>
+                    </div>
+                    <div class="flex flex-col justify-center">
+                        <h3 class="text-2xl font-semibold mb-4 chrome-text racing-style">Simple 3-Step Process</h3>
+                        <ol class="space-y-4 text-white">
+                            <li class="hover:text-gray-300 transition">1. Upload your gameplay video</li>
+                            <li class="hover:text-gray-300 transition">2. AI creates detailed guide with timestamps</li>
+                            <li class="hover:text-gray-300 transition">3. Review, edit, and publish</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Upcoming Features -->
+    <section id="upcoming" class="py-20 section-light">
+        <div class="container mx-auto px-6">
+            <h2 class="text-4xl font-bold text-center mb-16 text-white racing-style">Coming Soon</h2>
+            <div class="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                <div class="chrome-card prismatic-edge p-6 rounded-xl">
+                    <h3 class="text-xl font-semibold mb-4 chrome-text racing-style">Advanced Payment System</h3>
+                    <p class="text-white">New monetization features with transparent revenue sharing and quick payouts</p>
+                </div>
+                <div class="chrome-card prismatic-edge p-6 rounded-xl">
+                    <h3 class="text-xl font-semibold mb-4 chrome-text racing-style">Wiki Migration Tool</h3>
+                    <p class="text-white">Easily move your existing wiki content to Atlantis in just 3-5 days</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Beta Signup Section -->
+    <section class="py-20 section-dark">
+        <div class="container mx-auto px-6 text-center">
+            <h2 class="text-4xl font-bold mb-8 chrome-text racing-style">Join Our Private Beta</h2>
+            <p class="text-xl text-white mb-12 max-w-2xl mx-auto">
+                Be among the first to experience Atlantis. Sign up for early access to our platform.
+            </p>
+            <form id="betaForm" class="max-w-md mx-auto">
+                <div class="chrome-card p-6 rounded-xl prismatic-edge">
+                    <input 
+                        type="email" 
+                        id="email" 
+                        required 
+                        placeholder="Enter your email"
+                        class="w-full px-4 py-3 rounded-lg bg-black bg-opacity-50 border border-white border-opacity-20 text-white placeholder-gray-400 focus:outline-none focus:border-opacity-50 mb-4"
+                    >
+                    <button type="submit" class="btn-primary w-full px-8 py-4 rounded-full text-lg font-medium transition text-white racing-style">
+                        Get Early Access
+                    </button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <!-- Success Modal -->
+    <div id="successModal" class="fixed inset-0 flex items-center justify-center z-50 hidden">
+        <div class="absolute inset-0 bg-black bg-opacity-50 backdrop-blur-sm"></div>
+        <div class="chrome-card p-8 rounded-xl prismatic-edge relative z-10 max-w-md mx-4">
+            <h3 class="text-2xl font-bold mb-4 chrome-text racing-style">Thank You!</h3>
+            <p class="text-white mb-6">We'll send you access details within the next couple of days.</p>
+            <button onclick="closeModal()" class="btn-primary w-full px-6 py-3 rounded-full font-medium transition text-white racing-style">
+                Got it
+            </button>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="py-12 border-t border-gray-800">
+        <div class="container mx-auto px-6">
+            <div class="text-center text-gray-500">
+                <p>&copy; 2024 Atlantis. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        document.getElementById('betaForm').addEventListener('submit', async function(event)
